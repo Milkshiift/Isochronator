@@ -51,13 +51,25 @@ jobs:
       - name: Build PGO-optimized binary
         run: cargo pgo optimize
 
-      - name: Package binary for release (Linux/macOS)
-        if: runner.os != 'Windows'
+      - name: List build artifacts
+        run: |
+          ls -R target/release
+        shell: bash
+
+      - name: Package binary for release (Linux)
+        if: runner.os == 'Linux'
         run: |
           tar \
-            czvf ${{ env.BINARY_NAME }}-${{ runner.os }}.tar.gz \
-            -C target/release \
+          czvf ${{ env.BINARY_NAME }}-${{ runner.os }}.tar.gz \
+          -C target/release \
             ${{ env.BINARY_NAME }}
+
+      - name: Package binary for release (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd target/release
+          zip -r ../../${{ env.BINARY_NAME }}-${{ runner.os }}.zip ./${{ env.BINARY_NAME }}.app
+          cd ../..
 
       - name: Package binary for release (Windows)
         if: runner.os == 'Windows'
