@@ -63,20 +63,13 @@ jobs:
           ls -R target/${{ env.TARGET_TRIPLE }}/release
         shell: bash
 
-      - name: Package binary for release (Linux)
-        if: runner.os == 'Linux'
+      - name: Package binary for release (Linux/macos)
+        if: runner.os != 'Windows'
         run: |
           tar \
             czvf ${{ env.BINARY_NAME }}-${{ runner.os }}.tar.gz \
             -C target/${{ env.TARGET_TRIPLE }}/release \
             ${{ env.BINARY_NAME }}
-
-      - name: Package binary for release (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          cd target/${{ env.TARGET_TRIPLE }}/release
-          zip -r ../../../${{ env.BINARY_NAME }}-${{ runner.os }}.zip ./${{ env.BINARY_NAME }}.app
-          cd -
 
       - name: Package binary for release (Windows)
         if: runner.os == 'Windows'
