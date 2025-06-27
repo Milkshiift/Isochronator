@@ -15,108 +15,103 @@ env:
 
 jobs:
   build:
-    name: Build for ${{ matrix.target }}
+    name: Build on ${{ matrix.os }} for ${{ matrix.target || 'default' }}
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false
       matrix:
-        include:
-            # Cross compiled builds can't be PGOd
-
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            pgo: true
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            pgo: true
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            pgo: false
-
-          - os: macos-15
-            target: x86_64-apple-darwin
-            pgo: false
-          - os: macos-15
-            target: aarch64-apple-darwin
-            pgo: true
-
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            pgo: true
+        os: [ubuntu-latest, macos-15, windows-2025]
 
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
 
-      - name: Install cross-compilation dependencies (Linux)
+      - name: Install Linux dependencies (for winit and cpal)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
-            sudo dpkg --add-architecture arm64
-            sudo apt-get update
-            sudo apt-get install -y gcc-aarch64-linux-gnu \
-              libx11-dev:arm64 \
-              libxcursor-dev:arm64 \
-              libxrandr-dev:arm64 \
-              libxi-dev:arm64 \
-              libasound2-dev:arm64
-          else
-            sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev libxi-dev libasound2-dev
-          fi
+          sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev libxi-dev libasound2-dev
 
-      - name: Set up cross-compilation linker (Linux)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          mkdir -p .cargo
-          echo '[target.aarch64-unknown-linux-gnu]' >> .cargo/config.toml
-          echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml
-
-      - name: Install Rust toolchain
+      - name: Install Rust toolchain with PGO support
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: nightly
           components: llvm-tools-preview
-          target: ${{ matrix.target }}
           override: true
           cache: true
 
-      - name: Build with PGO (for native targets)
-        if: matrix.pgo
+      - name: Get Target Triple
+        id: get_target
         run: |
-          cargo install cargo-pgo
-          cargo pgo build -- --target ${{ matrix.target }} --bin ${{ env.BINARY_NAME }}
-          cargo pgo run -- --target ${{ matrix.target }} -- --headless-profile
-          cargo pgo optimize -- --target ${{ matrix.target }}
-
-      - name: Build with standard release (for cross-compiled targets)
-        if: '!matrix.pgo'
-        run: cargo build --release --target ${{ matrix.target }} --bin ${{ env.BINARY_NAME }}
-
-      - name: List build artifacts
-        run: |
-          echo "Listing contents of target/${{ matrix.target }}/release directory..."
-          ls -R target/${{ matrix.target }}/release
+          TARGET_TRIPLE=${{ matrix.target || '$(rustc -vV | sed -n "s/host: //p")' }}
+          echo "TARGET_TRIPLE=${TARGET_TRIPLE}" >> $GITHUB_ENV
         shell: bash
 
-      - name: Prepare binary for upload
-        id: prep_binary
+      - name: Create Platform Identifier
+        id: platform
+        shell: bash
         run: |
-          cd target/${{ matrix.target }}/release
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            mv ${{ env.BINARY_NAME }}.exe ../../../${{ env.BINARY_NAME }}-${{ matrix.target }}.exe
-            echo "BIN_PATH=${{ env.BINARY_NAME }}-${{ matrix.target }}.exe" >> $GITHUB_OUTPUT
-          else
-            mv ${{ env.BINARY_NAME }} ../../../${{ env.BINARY_NAME }}-${{ matrix.target }}
-            echo "BIN_PATH=${{ env.BINARY_NAME }}-${{ matrix.target }}" >> $GITHUB_OUTPUT
+          ARCH=$(echo "${{ env.TARGET_TRIPLE }}" | cut -d'-' -f1)
+          
+          OS_NAME=$(echo "${{ runner.os }}" | tr '[:upper:]' '[:lower:]')
+          
+          PLATFORM_ID="${ARCH}-${OS_NAME}"
+          echo "PLATFORM_ID=${PLATFORM_ID}" >> $GITHUB_ENV
+          
+          echo "Binary will be named for platform: ${PLATFORM_ID}"
+
+      - name: Install cargo-pgo
+        run: cargo install cargo-pgo
+
+      - name: Build instrumented binary
+        run: cargo pgo build --target ${{ env.TARGET_TRIPLE }} -- --bin ${{ env.BINARY_NAME }}
+
+      - name: Gather PGO profiles
+        run: cargo pgo run --target ${{ env.TARGET_TRIPLE }} -- -- --headless-profile
+
+      - name: Build PGO-optimized binary
+        run: cargo pgo optimize --target ${{ env.TARGET_TRIPLE }}
+
+      - name: Prepare Release Assets
+        shell: bash
+        run: |
+          # Create a directory to stage our release assets
+          mkdir release_assets
+
+          # Determine file extensions
+          EXE_SUFFIX=""
+          ARCHIVE_SUFFIX=".tar.gz"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            EXE_SUFFIX=".exe"
+            ARCHIVE_SUFFIX=".zip"
           fi
-        shell: bash
+
+          # Define asset names using the new PLATFORM_ID
+          BINARY_FILENAME="${{ env.BINARY_NAME }}-${{ env.PLATFORM_ID }}${EXE_SUFFIX}"
+          ARCHIVE_FILENAME="${{ env.BINARY_NAME }}-${{ env.PLATFORM_ID }}${ARCHIVE_SUFFIX}"
+          
+          # Define source and destination paths
+          BIN_SRC_PATH="target/${{ env.TARGET_TRIPLE }}/release/${{ env.BINARY_NAME }}${EXE_SUFFIX}"
+          BIN_DEST_PATH="release_assets/${BINARY_FILENAME}"
+          
+          echo "Copying binary from ${BIN_SRC_PATH} to ${BIN_DEST_PATH}"
+          cp "${BIN_SRC_PATH}" "${BIN_DEST_PATH}"
+
+          # Package the binary into an archive
+          echo "Creating archive: ${ARCHIVE_FILENAME}"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            7z a "release_assets/${ARCHIVE_FILENAME}" "${BIN_DEST_PATH}"
+          else
+            tar -czvf "release_assets/${ARCHIVE_FILENAME}" -C "release_assets" "${BINARY_FILENAME}"
+          fi
+          
+          echo "Listing prepared release assets:"
+          ls -R release_assets
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-binary-${{ matrix.target }}
-          path: ${{ steps.prep_binary.outputs.BIN_PATH }}
+          name: app-binaries-${{ env.PLATFORM_ID }}
+          path: release_assets/
 
   release:
     name: Create GitHub Release
@@ -130,18 +125,14 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: release-assets/
-          pattern: app-binary-*
-          merge-multiple: true
 
       - name: List downloaded files
-        run: |
-          echo "Downloaded files for release:"
-          ls -R release-assets/
+        run: ls -R release-assets/
 
       - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ startsWith(github.ref, 'refs/tags/') && format('Release {0}', github.ref_name) || format('Test Build from {0}', github.ref_name) }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && format('Release {0}', github.ref_name) || format('Build from {0}', github.ref_name) }}
           draft: true
           generate_release_notes: true
-          files: release-assets/*
+          files: release-assets/**/*
