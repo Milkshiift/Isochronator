@@ -54,19 +54,17 @@ jobs:
       - name: Package binary for release (Linux/macOS)
         if: runner.os != 'Windows'
         run: |
-          cd target/release
-          strip ${{ env.BINARY_NAME }}
-          tar czvf ${{ env.BINARY_NAME }}-${{ runner.os }}.tar.gz ${{ env.BINARY_NAME }}
-          cd ../..
-          mv target/release/*.tar.gz .
+          tar \
+            czvf ${{ env.BINARY_NAME }}-${{ runner.os }}.tar.gz \
+            -C target/release \
+            ${{ env.BINARY_NAME }}
 
       - name: Package binary for release (Windows)
         if: runner.os == 'Windows'
         run: |
           cd target/release
-          7z a ${{ env.BINARY_NAME }}-${{ runner.os }}.zip ${{ env.BINARY_NAME }}.exe
+          7z a ..\..\${{ env.BINARY_NAME }}-${{ runner.os }}.zip ${{ env.BINARY_NAME }}.exe
           cd ../..
-          move target\release\*.zip .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
