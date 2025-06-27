@@ -79,9 +79,9 @@ jobs:
         if: matrix.pgo
         run: |
           cargo install cargo-pgo
-          cargo pgo build --target ${{ matrix.target }} -- --bin ${{ env.BINARY_NAME }}
-          cargo pgo run --target ${{ matrix.target }} -- -- --headless-profile
-          cargo pgo optimize --target ${{ matrix.target }}
+          cargo pgo build -- --target ${{ matrix.target }} --bin ${{ env.BINARY_NAME }}
+          cargo pgo run -- --target ${{ matrix.target }} -- --headless-profile
+          cargo pgo optimize -- --target ${{ matrix.target }}
 
       - name: Build with standard release (for cross-compiled targets)
         if: '!matrix.pgo'
