@@ -52,11 +52,17 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          # Dependencies for winit/cpal (glibc)
-          sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev libxi-dev libasound2-dev
-          # Linker for aarch64 cross-compile
           if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
-            sudo apt-get install -y gcc-aarch64-linux-gnu
+            sudo dpkg --add-architecture arm64
+            sudo apt-get update
+            sudo apt-get install -y gcc-aarch64-linux-gnu \
+              libx11-dev:arm64 \
+              libxcursor-dev:arm64 \
+              libxrandr-dev:arm64 \
+              libxi-dev:arm64 \
+              libasound2-dev:arm64
+          else
+            sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev libxi-dev libasound2-dev
           fi
 
       - name: Set up cross-compilation linker (Linux)
