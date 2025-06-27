@@ -63,13 +63,13 @@ jobs:
         run: cargo install cargo-pgo
 
       - name: Build instrumented binary
-        run: cargo pgo build --target ${{ env.TARGET_TRIPLE }} -- --bin ${{ env.BINARY_NAME }}
+        run: cargo pgo build -- --bin ${{ env.BINARY_NAME }}
 
       - name: Gather PGO profiles
-        run: cargo pgo run --target ${{ env.TARGET_TRIPLE }} -- -- --headless-profile
+        run: cargo pgo run -- -- --headless-profile
 
       - name: Build PGO-optimized binary
-        run: cargo pgo optimize --target ${{ env.TARGET_TRIPLE }}
+        run: cargo pgo optimize
 
       - name: Prepare Release Assets
         shell: bash
