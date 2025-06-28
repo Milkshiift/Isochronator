@@ -3,17 +3,17 @@
 extern crate test;
 
 use std::f32::consts::PI;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use bytemuck::{Pod, Zeroable};
 use clap::Parser;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use env_logger::Env;
 use log::{error, info};
 use pixels::{Pixels, SurfaceTexture};
 use test::black_box;
-use env_logger::Env;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -93,7 +93,8 @@ struct Args {
     headless_profile: bool,
 }
 
-struct Config {
+#[derive(Debug, Clone)]
+struct AppConfig {
     tone_hz: f32,
     on_color: Color,
     off_color: Color,
@@ -105,6 +106,7 @@ struct Config {
 #[derive(Debug, Clone)]
 struct TimingState {
     start_time: Instant,
+    frequency: f64,
     period_secs: f64,
     pulse_duration_secs: f64,
 }
@@ -117,7 +119,7 @@ impl TimingState {
             "Starting session: {:.2} Hz, period: {:.4}s, pulse: {:.4}s",
             frequency, period_secs, pulse_duration_secs
         );
-        Self { start_time: Instant::now(), period_secs, pulse_duration_secs }
+        Self { start_time: Instant::now(), frequency, period_secs, pulse_duration_secs }
     }
 }
 
@@ -125,7 +127,7 @@ struct App {
     window: Option<Arc<Window>>,
     pixels: Option<Pixels<'static>>,
     timing_state: Arc<TimingState>,
-    config: Config,
+    config: AppConfig,
     _stream: cpal::Stream,
     last_frame_instant: Instant,
 }
@@ -231,22 +233,99 @@ fn get_on_ratio(interval_start: f64, interval_end: f64, period: f64, pulse_durat
     total_on_time / interval_duration
 }
 
-/// Calculates the audio amplitude envelope for a given sample time to prevent clicks.
-fn get_audio_envelope(sample_time: f32, period: f32, pulse_duration: f32, ramp_duration: f32) -> f32 {
-    let time_in_cycle = sample_time % period;
-    if time_in_cycle > pulse_duration { return 0.0; }
+struct AudioEngine {
+    sample_rate: f32,
+    amplitude: f32,
+    binaural: bool,
+    pulse_width_in_phase: f32,
+    ramp_duration_in_phase: f32,
 
-    let ramp_down_start = pulse_duration - ramp_duration;
-    if time_in_cycle < ramp_duration { // Ramp up
-        0.5 * (1.0 - (PI * time_in_cycle / ramp_duration).cos())
-    } else if time_in_cycle > ramp_down_start && pulse_duration > 2.0 * ramp_duration { // Ramp down
-        0.5 * (1.0 + (PI * (time_in_cycle - ramp_down_start) / ramp_duration).cos())
-    } else { // Hold
-        1.0
+    pulse_phase: f32,
+    pulse_phase_inc: f32,
+
+    left_tone_phase: f32,
+    right_tone_phase: f32,
+    left_tone_phase_inc: f32,
+    right_tone_phase_inc: f32,
+}
+
+impl AudioEngine {
+    fn new(sample_rate: f32, timing: &TimingState, config: &AppConfig) -> Self {
+        let beat_frequency = timing.frequency as f32;
+        let period_secs = timing.period_secs as f32;
+
+        let left_freq = config.tone_hz;
+        let right_freq = if config.binaural {
+            config.tone_hz + beat_frequency
+        } else {
+            config.tone_hz
+        };
+
+        let pulse_phase_inc = beat_frequency / sample_rate;
+        let left_tone_phase_inc = left_freq / sample_rate;
+        let right_tone_phase_inc = right_freq / sample_rate;
+
+        let ramp_duration_in_phase = (config.ramp_duration / period_secs).min(0.5);
+        let pulse_width_in_phase = PULSE_WIDTH as f32;
+
+        Self {
+            sample_rate,
+            amplitude: config.amplitude,
+            binaural: config.binaural,
+            pulse_width_in_phase,
+            ramp_duration_in_phase,
+            pulse_phase: 0.0,
+            pulse_phase_inc,
+            left_tone_phase: 0.0,
+            right_tone_phase: 0.0,
+            left_tone_phase_inc,
+            right_tone_phase_inc,
+        }
+    }
+
+    fn next_sample(&mut self) -> (f32, f32) {
+        let (left_val, right_val) = if self.binaural {
+            // Binaural: two continuous sine waves with slightly different frequencies.
+            // No envelope is needed.
+            let left = (self.left_tone_phase * 2.0 * PI).sin();
+            let right = (self.right_tone_phase * 2.0 * PI).sin();
+            (left, right)
+        } else {
+            // Isochronic: one sine wave pulsed on and off.
+            let envelope = self.get_isochronic_envelope();
+            let val = (self.left_tone_phase * 2.0 * PI).sin() * envelope;
+            (val, val)
+        };
+
+        self.pulse_phase = (self.pulse_phase + self.pulse_phase_inc) % 1.0;
+        self.left_tone_phase = (self.left_tone_phase + self.left_tone_phase_inc) % 1.0;
+        self.right_tone_phase = (self.right_tone_phase + self.right_tone_phase_inc) % 1.0;
+
+        (left_val * self.amplitude, right_val * self.amplitude)
+    }
+
+    fn get_isochronic_envelope(&self) -> f32 {
+        // If we are outside the pulse width, the sound is off.
+        if self.pulse_phase > self.pulse_width_in_phase {
+            return 0.0;
+        }
+
+        // Calculate progress through the ramp-up and ramp-down phases.
+        let ramp_up = self.pulse_phase / self.ramp_duration_in_phase;
+        let ramp_down = (self.pulse_width_in_phase - self.pulse_phase) / self.ramp_duration_in_phase;
+
+        // The envelope is the minimum of the two ramps. This elegantly handles
+        // the "hold" phase (where both ramps are > 1.0) and overlapping ramps
+        // (where the pulse is shorter than two ramp durations).
+        let envelope = ramp_up.min(ramp_down).min(1.0);
+
+        // Apply a cosine curve for a smooth, non-linear ramp.
+        0.5 * (1.0 - (PI * envelope).cos())
     }
 }
 
-fn setup_audio(timing_state: Arc<TimingState>, config: &Config) -> Result<cpal::Stream> {
+
+fn setup_audio(timing_state: Arc<TimingState>, config: &AppConfig) -> Result<cpal::Stream> {
     let host = cpal::default_host();
     let device = host.default_output_device().ok_or_else(|| anyhow::anyhow!("No default audio device"))?;
     info!("Audio output device: {}", device.name()?);
@@ -261,64 +340,24 @@ fn build_audio_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     timing_state: Arc<TimingState>,
-    app_config: &Config,
+    app_config: &AppConfig,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
     let channels = config.channels as usize;
     let sample_rate = config.sample_rate.0 as f32;
-    let start_time = timing_state.start_time;
-    let period_secs = timing_state.period_secs as f32;
-    let pulse_duration_secs = timing_state.pulse_duration_secs as f32;
 
-    let binaural = app_config.binaural;
-    let tone_hz = app_config.tone_hz;
-    let amplitude = app_config.amplitude;
-    let ramp_duration = app_config.ramp_duration;
-
-    // Calculate beat frequency from timing state
-    let beat_frequency = timing_state.period_secs.recip() as f32;
+    let engine = Arc::new(Mutex::new(AudioEngine::new(
+        sample_rate,
+        &timing_state,
+        app_config,
+    )));
 
     let data_callback = move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-        let elapsed_secs = start_time.elapsed().as_secs_f32();
+        let mut engine = engine.lock().unwrap();
+        for frame in data.chunks_mut(channels) {
+            let (left, right) = engine.next_sample();
 
-        if binaural {
-            // Binaural
-            let left_freq = tone_hz;
-            let right_freq = tone_hz + beat_frequency;
-
-            for i in 0..data.len() / channels {
-                let sample_time = elapsed_secs + (i as f32 / sample_rate);
-
-                let left_val = (sample_time * left_freq * 2.0 * PI).sin();
-                let right_val = (sample_time * right_freq * 2.0 * PI).sin();
-
-                let value_left = left_val * amplitude;
-                let value_right = right_val * amplitude;
-
-                // Distribute audio to channels
-                for channel in 0..channels {
-                    if channel % 2 == 0 {
-                        data[i * channels + channel] = value_left;
-                    } else {
-                        data[i * channels + channel] = value_right;
-                    }
-                }
-            }
-        } else {
-            // Isochronic
-            for i in 0..data.len() / channels {
-                let sample_time = elapsed_secs + (i as f32 / sample_rate);
-                let envelope = get_audio_envelope(
-                    sample_time,
-                    period_secs,
-                    pulse_duration_secs,
-                    ramp_duration
-                );
-                let sine_val = (sample_time * tone_hz * 2.0 * PI).sin();
-                let value = sine_val * amplitude * envelope;
-
-                for channel in 0..channels {
-                    data[i * channels + channel] = value;
-                }
+            for (i, sample) in frame.iter_mut().enumerate() {
+                *sample = if i % 2 == 0 { left } else { right };
             }
         }
     };
@@ -327,11 +366,12 @@ fn build_audio_stream(
 }
 
 // For PGO
-fn run_headless_profile(timing_state: &TimingState, config: &Config) {
+fn run_headless_profile(timing_state: &TimingState, config: &AppConfig) {
     info!("Running in headless profiling mode for 2 seconds...");
     let start = Instant::now();
     let duration = Duration::from_secs(2);
 
+    // Profile visual component
     let mut current_time = 0.0;
     let frame_time_60fps = 1.0 / 60.0;
     while Instant::now().duration_since(start) < duration {
@@ -345,37 +385,11 @@ fn run_headless_profile(timing_state: &TimingState, config: &Config) {
         current_time += frame_time_60fps;
     }
 
+    // Profile audio component
     let sample_rate = 44100.0;
-    let sample_duration = 1.0 / sample_rate;
-    let mut sample_time = 0.0f32;
-    let beat_frequency = timing_state.period_secs.recip() as f32;
-
-    // Binaural
-    let left_freq = config.tone_hz;
-    let right_freq = config.tone_hz + beat_frequency;
-
+    let mut engine = AudioEngine::new(sample_rate, timing_state, config);
     for _ in 0..(sample_rate as usize * 2) {
-        let envelope = black_box(get_audio_envelope(
-            sample_time,
-            timing_state.period_secs as f32,
-            timing_state.pulse_duration_secs as f32,
-            config.ramp_duration,
-        ));
-        let _left_val = black_box((sample_time * left_freq * 2.0 * PI).sin() * config.amplitude * envelope);
-        let _right_val = black_box((sample_time * right_freq * 2.0 * PI).sin() * config.amplitude * envelope);
-        sample_time += sample_duration;
-    }
-
-    // Isochronic
-    for _ in 0..(sample_rate as usize * 2) {
-        let envelope = black_box(get_audio_envelope(
-            sample_time,
-            timing_state.period_secs as f32,
-            timing_state.pulse_duration_secs as f32,
-            config.ramp_duration,
-        ));
-        let _value = black_box((sample_time * config.tone_hz * 2.0 * PI).sin() * config.amplitude * envelope);
-        sample_time += sample_duration;
+        black_box(engine.next_sample());
     }
 
     info!("Headless profiling run finished.");
@@ -387,7 +401,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     let timing_state = Arc::new(TimingState::new(args.frequency));
-    let config = Config {
+    let config = AppConfig {
         tone_hz: args.tone_hz,
         on_color: args.on_color,
         off_color: args.off_color,
@@ -403,6 +417,7 @@ fn main() -> Result<()> {
 
         let _stream = setup_audio(timing_state, &config)?;
 
+        // Park the main thread to keep the program alive.
         std::thread::park();
     } else {
         let event_loop = EventLoop::new()?;
