@@ -2,6 +2,10 @@
 name = "isochronator"
 version = "1.0.0"
 edition = "2024"
+readme = "README.md"
+license = "MIT"
+homepage = "https://github.com/Milkshiift/Isochronator"
+repository = "https://github.com/Milkshiift/Isochronator"
 
 [dependencies]
 winit = "0.30"

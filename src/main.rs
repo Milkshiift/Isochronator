@@ -2,7 +2,6 @@
 #![feature(test)]
 extern crate test;
 
-
 use std::f32::consts::PI;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,13 +13,13 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{error, info};
 use pixels::{Pixels, SurfaceTexture};
 use test::black_box;
+use env_logger::Env;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, Window, WindowId};
-
 
 const PULSE_WIDTH: f64 = 0.5;
 
@@ -55,9 +54,9 @@ fn parse_color(s: &str) -> Result<Color, String> {
 }
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "A simple isochronic tone and visual stimulus generator.")]
+#[command(author, version, about = "A simple isochronic/binaural tone and visual stimulus generator.")]
 struct Args {
-    /// The primary frequency of the isochronic tones in Hz.
+    /// The primary frequency of the isochronic tones in Hz. In binaural mode, this becomes the beat frequency.
     #[arg(short, long, default_value_t = 20.0)]
     frequency: f64,
 
@@ -73,6 +72,10 @@ struct Args {
     #[arg(short, long, default_value_t = 440.0)]
     tone_hz: f32,
 
+    /// Enable binaural beat mode instead of isochronic tones
+    #[arg(short, long)]
+    binaural: bool,
+
     /// The 'on' color of the screen flash (RRGGBB hex).
     #[arg(long, value_parser = parse_color, default_value = "ffffff")]
     on_color: Color,
@@ -81,7 +84,11 @@ struct Args {
     #[arg(long, value_parser = parse_color, default_value = "000000")]
     off_color: Color,
 
-    /// Run in a headless mode for a few seconds to generate PGO profile data.
+    /// Run in headless mode (audio only, no visuals).
+    #[arg(long, conflicts_with = "headless_profile")]
+    headless: bool,
+
+    /// Run in a headless mode for a few seconds to generate PGO profile data (no audio output).
     #[arg(long)]
     headless_profile: bool,
 }
@@ -92,6 +99,7 @@ struct Config {
     off_color: Color,
     ramp_duration: f32,
     amplitude: f32,
+    binaural: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -260,20 +268,57 @@ fn build_audio_stream(
     let start_time = timing_state.start_time;
     let period_secs = timing_state.period_secs as f32;
     let pulse_duration_secs = timing_state.pulse_duration_secs as f32;
+
+    let binaural = app_config.binaural;
     let tone_hz = app_config.tone_hz;
     let amplitude = app_config.amplitude;
     let ramp_duration = app_config.ramp_duration;
 
+    // Calculate beat frequency from timing state
+    let beat_frequency = timing_state.period_secs.recip() as f32;
+
     let data_callback = move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
         let elapsed_secs = start_time.elapsed().as_secs_f32();
-        for i in 0..data.len() / channels {
-            let sample_time = elapsed_secs + (i as f32 / sample_rate);
-            let envelope = get_audio_envelope(sample_time, period_secs, pulse_duration_secs, ramp_duration);
-            let sine_val = (sample_time * tone_hz * 2.0 * PI).sin();
-            let value = sine_val * amplitude * envelope;
 
-            for channel in 0..channels {
-                data[i * channels + channel] = value;
+        if binaural {
+            // Binaural
+            let left_freq = tone_hz;
+            let right_freq = tone_hz + beat_frequency;
+
+            for i in 0..data.len() / channels {
+                let sample_time = elapsed_secs + (i as f32 / sample_rate);
+
+                let left_val = (sample_time * left_freq * 2.0 * PI).sin();
+                let right_val = (sample_time * right_freq * 2.0 * PI).sin();
+
+                let value_left = left_val * amplitude;
+                let value_right = right_val * amplitude;
+
+                // Distribute audio to channels
+                for channel in 0..channels {
+                    if channel % 2 == 0 {
+                        data[i * channels + channel] = value_left;
+                    } else {
+                        data[i * channels + channel] = value_right;
+                    }
+                }
+            }
+        } else {
+            // Isochronic
+            for i in 0..data.len() / channels {
+                let sample_time = elapsed_secs + (i as f32 / sample_rate);
+                let envelope = get_audio_envelope(
+                    sample_time,
+                    period_secs,
+                    pulse_duration_secs,
+                    ramp_duration
+                );
+                let sine_val = (sample_time * tone_hz * 2.0 * PI).sin();
+                let value = sine_val * amplitude * envelope;
+
+                for channel in 0..channels {
+                    data[i * channels + channel] = value;
+                }
             }
         }
     };
@@ -281,6 +326,7 @@ fn build_audio_stream(
     device.build_output_stream(config, data_callback, |err| error!("Audio stream error: {err}"), None)
 }
 
+// For PGO
 fn run_headless_profile(timing_state: &TimingState, config: &Config) {
     info!("Running in headless profiling mode for 2 seconds...");
     let start = Instant::now();
@@ -302,6 +348,25 @@ fn run_headless_profile(timing_state: &TimingState, config: &Config) {
     let sample_rate = 44100.0;
     let sample_duration = 1.0 / sample_rate;
     let mut sample_time = 0.0f32;
+    let beat_frequency = timing_state.period_secs.recip() as f32;
+
+    // Binaural
+    let left_freq = config.tone_hz;
+    let right_freq = config.tone_hz + beat_frequency;
+
+    for _ in 0..(sample_rate as usize * 2) {
+        let envelope = black_box(get_audio_envelope(
+            sample_time,
+            timing_state.period_secs as f32,
+            timing_state.pulse_duration_secs as f32,
+            config.ramp_duration,
+        ));
+        let _left_val = black_box((sample_time * left_freq * 2.0 * PI).sin() * config.amplitude * envelope);
+        let _right_val = black_box((sample_time * right_freq * 2.0 * PI).sin() * config.amplitude * envelope);
+        sample_time += sample_duration;
+    }
+
+    // Isochronic
     for _ in 0..(sample_rate as usize * 2) {
         let envelope = black_box(get_audio_envelope(
             sample_time,
@@ -318,7 +383,7 @@ fn run_headless_profile(timing_state: &TimingState, config: &Config) {
 
 
 fn main() -> Result<()> {
-    env_logger::init();
+    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     let args = Args::parse();
 
     let timing_state = Arc::new(TimingState::new(args.frequency));
@@ -328,10 +393,17 @@ fn main() -> Result<()> {
         off_color: args.off_color,
         ramp_duration: args.ramp_duration,
         amplitude: args.amplitude,
+        binaural: args.binaural,
     };
 
     if args.headless_profile {
         run_headless_profile(&timing_state, &config);
+    } else if args.headless {
+        info!("Running in headless (audio-only) mode. Press Ctrl-C to exit.");
+
+        let _stream = setup_audio(timing_state, &config)?;
+
+        std::thread::park();
     } else {
         let event_loop = EventLoop::new()?;
         event_loop.set_control_flow(ControlFlow::Poll);
