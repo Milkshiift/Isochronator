@@ -12,6 +12,19 @@ This application generates a pulsing sound (isochronic tone) or a binaural beat,
 *   **Configurable:** Set the primary frequency, base tone, on/off colors, audio ramp time, and volume from the command line.
 *   **Cross-Platform:** Built with `winit`, `pixels`, and `cpal`, it should run on Windows, macOS, and Linux.
 
+> [!CAUTION]
+> ## HEALTH AND SAFETY WARNING
+>
+> This software produces intense flashing lights that can trigger seizures in people with photosensitive epilepsy (PSE). You may have this condition without knowing it.
+>
+> ### Safe Use Guidelines
+> *   **Never use this application when you are alone.**
+> *   Start with a small window in a well-lit room. Do not use fullscreen.
+> *   If you feel dizzy, unwell, or experience any strange visual effects, **stop immediately**.
+> *   For a risk-free, audio-only experience, use the `--headless` flag.
+>
+> **You assume all health risks by using this software. The developer is not liable for any harm caused.**
+
 ## Build & Run
 
 1.  **Clone the repository:**
