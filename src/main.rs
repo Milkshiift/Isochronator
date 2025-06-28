@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use argh::FromArgs;
 use bytemuck::{Pod, Zeroable};
-use clap::Parser;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use env_logger::Env;
 use log::{error, info};
@@ -53,43 +53,51 @@ fn parse_color(s: &str) -> Result<Color, String> {
     Ok(Color { r, g, b, a: 0xff })
 }
 
-#[derive(Parser, Debug)]
-#[command(author, version, about = "A simple isochronic/binaural tone and visual stimulus generator.")]
+fn default_on_color() -> Color {
+    parse_color("ffffff").unwrap()
+}
+
+fn default_off_color() -> Color {
+    parse_color("000000").unwrap()
+}
+
+#[derive(FromArgs, Debug)]
+/// A simple isochronic/binaural tone and visual stimulus generator.
 struct Args {
-    /// The primary frequency of the isochronic tones in Hz. In binaural mode, this becomes the beat frequency.
-    #[arg(short, long, default_value_t = 20.0)]
+    /// the primary frequency of the isochronic tones in Hz. In binaural mode, this becomes the beat frequency.
+    #[argh(option, short = 'f', default = "20.0")]
     frequency: f64,
 
-    /// The duration of the audio fade-in/out ramp in seconds. Low values may produce clicks.
-    #[arg(short, long, default_value_t = 0.005)]
+    /// the duration of the audio fade-in/out ramp in seconds. Low values may produce clicks.
+    #[argh(option, short = 'r', default = "0.005")]
     ramp_duration: f32,
 
-    /// The audio volume (0.0 to 1.0).
-    #[arg(short, long, default_value_t = 0.25)]
+    /// the audio volume (0.0 to 1.0).
+    #[argh(option, short = 'a', default = "0.25")]
     amplitude: f32,
 
-    /// The frequency of the audible sine wave tone in Hz.
-    #[arg(short, long, default_value_t = 440.0)]
+    /// the frequency of the audible sine wave tone in Hz.
+    #[argh(option, short = 't', default = "440.0")]
     tone_hz: f32,
 
-    /// Enable binaural beat mode instead of isochronic tones
-    #[arg(short, long)]
+    /// enable binaural beat mode instead of isochronic tones
+    #[argh(switch, short = 'b')]
     binaural: bool,
 
-    /// The 'on' color of the screen flash (RRGGBB hex).
-    #[arg(long, value_parser = parse_color, default_value = "ffffff")]
+    /// the 'on' color of the screen flash (RRGGBB hex).
+    #[argh(option, from_str_fn(parse_color), default = "default_on_color()")]
     on_color: Color,
 
-    /// The 'off' color of the screen flash (RRGGBB hex).
-    #[arg(long, value_parser = parse_color, default_value = "000000")]
+    /// the 'off' color of the screen flash (RRGGBB hex).
+    #[argh(option, from_str_fn(parse_color), default = "default_off_color()")]
     off_color: Color,
 
-    /// Run in headless mode (audio only, no visuals).
-    #[arg(long, conflicts_with = "headless_profile")]
+    /// run in headless mode (audio only, no visuals).
+    #[argh(switch)]
     headless: bool,
 
-    /// Run in a headless mode for a few seconds to generate PGO profile data (no audio output).
-    #[arg(long)]
+    /// run in a headless mode for a few seconds to generate PGO profile data (no audio output).
+    #[argh(switch)]
     headless_profile: bool,
 }
 
@@ -234,7 +242,6 @@ fn get_on_ratio(interval_start: f64, interval_end: f64, period: f64, pulse_durat
 }
 
 struct AudioEngine {
-    sample_rate: f32,
     amplitude: f32,
     binaural: bool,
     pulse_width_in_phase: f32,
@@ -269,7 +276,6 @@ impl AudioEngine {
         let pulse_width_in_phase = PULSE_WIDTH as f32;
 
         Self {
-            sample_rate,
             amplitude: config.amplitude,
             binaural: config.binaural,
             pulse_width_in_phase,
@@ -398,7 +404,13 @@ fn run_headless_profile(timing_state: &TimingState, config: &AppConfig) {
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
-    let args = Args::parse();
+    let args: Args = argh::from_env();
+
+    // argh doesn't have declarative `conflicts_with`, so we check manually.
+    if args.headless && args.headless_profile {
+        eprintln!("Error: --headless and --headless-profile cannot be used at the same time.");
+        std::process::exit(1);
+    }
 
     let timing_state = Arc::new(TimingState::new(args.frequency));
     let config = AppConfig {
