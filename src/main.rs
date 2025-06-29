@@ -283,18 +283,22 @@ impl ApplicationHandler for App {
 
 fn get_on_ratio(interval_start: f64, interval_end: f64, period: f64, pulse_duration: f64) -> f64 {
     let interval_duration = interval_end - interval_start;
-    if interval_duration <= 0.0 { return 0.0; }
-    let mut total_on_time = 0.0;
-    let mut current_cycle_start = (interval_start / period).floor() * period;
-    while current_cycle_start < interval_end {
-        let pulse_on_start = current_cycle_start;
-        let pulse_on_end = current_cycle_start + pulse_duration;
-        let overlap_start = interval_start.max(pulse_on_start);
-        let overlap_end = interval_end.min(pulse_on_end);
-        total_on_time += (overlap_end - overlap_start).max(0.0);
-        current_cycle_start += period;
+    if interval_duration <= 0.0 {
+        return 0.0;
     }
-    total_on_time / interval_duration
+
+    let total_on_time_until = |t: f64| {
+        if t <= 0.0 { return 0.0; }
+        let num_full_cycles = (t / period).floor();
+        let time_in_current_cycle = t % period;
+        let on_time_in_current_cycle = time_in_current_cycle.min(pulse_duration);
+
+        num_full_cycles * pulse_duration + on_time_in_current_cycle
+    };
+
+    let on_time_in_interval = total_on_time_until(interval_end) - total_on_time_until(interval_start);
+
+    on_time_in_interval / interval_duration
 }
 
 struct AudioEngine {
