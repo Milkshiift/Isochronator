@@ -3,22 +3,31 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    rust-overlay.url = "github:oxalica/rust-overlay";
+    fenix = {
+      url = "github:nix-community/fenix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, rust-overlay, flake-utils, ... }:
+  outputs = { self, nixpkgs, fenix, flake-utils, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        overlays = [ (import rust-overlay) ];
-        pkgs = import nixpkgs { inherit system overlays; };
+        pkgs = import nixpkgs { inherit system; };
+        rustToolchain = fenix.packages.${system}.latest.withComponents [
+          "rustc"
+          "cargo"
+          "rust-src"
+          "rustfmt"
+        ];
       in
       {
         devShells.default = pkgs.mkShell {
           nativeBuildInputs = with pkgs; [
             pkg-config
-            (rust-bin.selectLatestNightlyWith (toolchain: toolchain.default))
+            rustToolchain
             fish
+            fenix.packages.${system}.rust-analyzer
           ];
 
           buildInputs = with pkgs; [
@@ -36,6 +45,7 @@
             vulkan-loader
             vulkan-headers
             vulkan-tools
+            mold
           ];
 
           PKG_CONFIG_PATH = with pkgs; lib.makeSearchPath "lib/pkgconfig" [
@@ -47,6 +57,7 @@
             libxkbcommon
             alsa-lib.dev
             vulkan-loader
+            mold
           ];
 
           LD_LIBRARY_PATH = with pkgs; lib.makeLibraryPath [
@@ -60,11 +71,13 @@
             alsa-lib
             udev
             vulkan-loader
+            mold
           ];
 
           VK_LAYER_PATH = "${pkgs.vulkan-validation-layers}/share/vulkan/explicit_layer.d";
 
           shellHook = ''
+            export RUST_SRC_PATH="${rustToolchain}/lib/rustlib/src/rust/library"
             exec fish
           '';
         };

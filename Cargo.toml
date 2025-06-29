@@ -16,6 +16,10 @@ pixels = "0.15"
 log = "0.4"
 bytemuck = { version = "1.23", features = ["derive"] }
 argh = "0.1"
+egui = "0.31"
+egui-wgpu = "0.31"
+egui-winit = "0.31"
+eframe = "0.31"
 
 [profile.release]
 opt-level = 3
