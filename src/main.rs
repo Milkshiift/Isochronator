@@ -2,7 +2,7 @@
 #![feature(test)]
 extern crate test;
 
-use std::f32::consts::PI;
+use std::f32::consts::{PI, TAU};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -24,6 +24,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, Window, WindowId};
 
 const PULSE_WIDTH: f64 = 0.5;
+const MINIMAL_WINDOW_BACKGROUND: Color = Color { r: 0x22, g: 0x22, b: 0x22, a: 0xff };
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -35,8 +36,8 @@ struct Color {
 }
 
 impl Color {
-    fn lerp(start: Color, end: Color, t: f64) -> Self {
-        let t = t.clamp(0.0, 1.0) as f32;
+    fn lerp(start: Color, end: Color, t: f32) -> Self {
+        let t = t.clamp(0.0, 1.0);
         let r = start.r as f32 + (end.r as f32 - start.r as f32) * t;
         let g = start.g as f32 + (end.g as f32 - start.g as f32) * t;
         let b = start.b as f32 + (end.b as f32 - start.b as f32) * t;
@@ -215,11 +216,9 @@ impl ApplicationHandler for App {
         if let (Some(window), Some(pixels)) = (&self.window, self.pixels.as_mut()) {
             match event {
                 WindowEvent::RedrawRequested => {
-                    let pixels = self.pixels.as_mut().unwrap();
-
                     if self.config.minimal_window {
                         let frame: &mut [Color] = bytemuck::cast_slice_mut(pixels.frame_mut());
-                        frame.fill(Color { r: 0x22, g: 0x22, b: 0x22, a: 0xff });
+                        frame.fill(MINIMAL_WINDOW_BACKGROUND);
                     } else {
                         let current_frame = Instant::now();
                         let start_of_frame = self.last_frame_instant.duration_since(self.timing_state.start_time);
@@ -231,7 +230,7 @@ impl ApplicationHandler for App {
                             end_of_frame.as_secs_f64(),
                             self.timing_state.period_secs,
                             self.timing_state.pulse_duration_secs,
-                        );
+                        ) as f32;
 
                         let color = Color::lerp(self.config.off_color, self.config.on_color, on_ratio);
                         let frame: &mut [Color] = bytemuck::cast_slice_mut(pixels.frame_mut());
@@ -351,16 +350,19 @@ impl AudioEngine {
 
     fn next_sample(&mut self) -> (f32, f32) {
         let (left_val, right_val) = if self.binaural {
-            let left = (self.left_tone_phase * 2.0 * PI).sin();
-            let right = (self.right_tone_phase * 2.0 * PI).sin();
+            let left = (self.left_tone_phase * TAU).sin();
+            let right = (self.right_tone_phase * TAU).sin();
             (left, right)
         } else {
             let envelope = self.get_isochronic_envelope();
-            let val = (self.left_tone_phase * 2.0 * PI).sin() * envelope;
+            let val = (self.left_tone_phase * TAU).sin() * envelope;
             (val, val)
         };
 
-        self.pulse_phase = (self.pulse_phase + self.pulse_phase_inc) % 1.0;
+        self.pulse_phase += self.pulse_phase_inc;
+        if self.pulse_phase >= 1.0 {
+            self.pulse_phase -= 1.0;
+        }
         self.left_tone_phase = (self.left_tone_phase + self.left_tone_phase_inc) % 1.0;
         self.right_tone_phase = (self.right_tone_phase + self.right_tone_phase_inc) % 1.0;
 
@@ -400,19 +402,19 @@ fn build_audio_stream(
     let channels = config.channels as usize;
     let sample_rate = config.sample_rate.0 as f32;
 
-    let engine = Arc::new(Mutex::new(AudioEngine::new(
-        sample_rate,
-        &timing_state,
-        app_config,
-    )));
+    let mut engine = AudioEngine::new(sample_rate, &timing_state, app_config);
 
     let data_callback = move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-        let mut engine = engine.lock().unwrap();
         for frame in data.chunks_mut(channels) {
             let (left, right) = engine.next_sample();
 
-            for (i, sample) in frame.iter_mut().enumerate() {
-                *sample = if i % 2 == 0 { left } else { right };
+            if let [l, r] = frame {
+                *l = left;
+                *r = right;
+            } else {
+                for (i, sample) in frame.iter_mut().enumerate() {
+                    *sample = if i % 2 == 0 { left } else { right };
+                }
             }
         }
     };
@@ -433,7 +435,7 @@ fn run_headless_profile(timing_state: &TimingState, config: &AppConfig) {
             current_time + frame_time_60fps,
             timing_state.period_secs,
             timing_state.pulse_duration_secs,
-        ));
+        )) as f32;
         let _color = black_box(Color::lerp(config.off_color, config.on_color, on_ratio));
         current_time += frame_time_60fps;
     }
