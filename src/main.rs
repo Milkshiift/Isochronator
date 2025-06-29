@@ -16,6 +16,7 @@ use env_logger::Env;
 use log::{error, info};
 use pixels::{Pixels, SurfaceTexture};
 use test::black_box;
+use egui::SliderClamping;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -516,11 +517,11 @@ impl eframe::App for ControlPanelApp {
                 .striped(true)
                 .show(ui, |ui| {
                     ui.label("Frequency (Hz):");
-                    ui.add(egui::Slider::new(&mut self.frequency, 0.1..=50.0).logarithmic(true));
+                    ui.add(egui::Slider::new(&mut self.frequency, 0.1..=50.0).clamping(SliderClamping::Never).logarithmic(true));
                     ui.end_row();
 
                     ui.label("Tone Frequency (Hz):");
-                    ui.add(egui::Slider::new(&mut self.tone_hz, 20.0..=1000.0).logarithmic(true));
+                    ui.add(egui::Slider::new(&mut self.tone_hz, 20.0..=1000.0).clamping(SliderClamping::Never).logarithmic(true));
                     ui.end_row();
 
                     ui.label("Ramp Duration (s):");
