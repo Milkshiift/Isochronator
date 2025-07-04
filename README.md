@@ -1,14 +1,17 @@
 # Isochronator
 
-A simple isochronic tone and binaural beat generator with visual stimulus written in Rust.
+A lightweight, cross-platform application for generating **isochronic tones** and **binaural beats** with synchronized visual stimuli, written in Rust 🦀.
 
-This application generates a pulsing sound (isochronic tone) or a binaural beat, synchronized with a flashing screen.
+<div align="center">
+<img src="assets/gui.png" width="300" alt="GUI Screenshot">
+</div>
 
 ## Features
 
 *   **Isochronic Tones:** Generates a pure sine wave tone that pulses at a specified frequency.
 *   **Binaural Beats:** Generates two slightly different pure sine wave tones, one for each ear, creating the perception of a third "beat" frequency within the brain.
-*   **Visual Stimulus:** The screen flashes in sync with the audio tone. The brightness is anti-aliased for a smoother (and a more correct) visual effect.
+*   **Visual Stimulus:** The screen flashes in sync with the audio tone.
+*   **Graphical User Interface:** A simple GUI for configuring the tone and visual stimulus parameters.
 *   **Configurable:** Set the primary frequency, base tone, on/off colors, audio ramp time, and volume from the command line.
 *   **Cross-Platform:** Built with `winit`, `pixels`, and `cpal`, it should run on Windows, macOS, and Linux.
 
@@ -17,12 +20,8 @@ This application generates a pulsing sound (isochronic tone) or a binaural beat,
 >
 > This software produces intense flashing lights that can trigger seizures in people with photosensitive epilepsy (PSE). You may have this condition without knowing it.
 >
-> ### Safe Use Guidelines
-> *   **Never use this application when you are alone.**
-> *   Start with a small window in a well-lit room. Do not use fullscreen.
-> *   If you feel dizzy, unwell, or experience any strange visual effects, **stop immediately**.
-> *   For a risk-free, audio-only experience, use the `--headless` flag.
->
+> An audio-only mode is available to avoid visual stimuli.
+> 
 > **You assume all health risks by using this software. The developer is not liable for any harm caused.**
 
 ## Build & Run
@@ -41,26 +40,32 @@ This application generates a pulsing sound (isochronic tone) or a binaural beat,
     ```
 
 ### Usage
-
-Run with `--help` to see all options.
+Run without arguments to launch the GUI for interactive control. For command-line usage, append options as shown below.
+Use `--help` to see all options.
 
 ```
-A simple isochronic/binaural tone and visual stimulus generator.
+Usage: isochronator [-f <frequency>] [-r <ramp-duration>] [-a <amplitude>] [-t <tone-hz>] [-b] [--on-color <on-color>] [--off-color <off-color>] [--headless] [--headless-profile] [--minimal-window]
 
-Usage: isochronator [OPTIONS]
+A simple isochronic/binaural tone and visual stimulus generator. Run without arguments for a GUI control panel.
 
 Options:
-  -f, --frequency <FREQUENCY>          The primary frequency of the isochronic tones in Hz. In binaural mode, this becomes the beat frequency [default: 20]
-  -r, --ramp-duration <RAMP_DURATION>  The duration of the audio fade-in/out ramp in seconds. Low values may produce clicks [default: 0.005]
-  -a, --amplitude <AMPLITUDE>          The audio volume (0.0 to 1.0) [default: 0.25]
-  -t, --tone-hz <TONE_HZ>              The frequency of the audible sine wave tone in Hz [default: 440]
-  -b, --binaural                       Enable binaural beat mode instead of isochronic tones
-      --on-color <ON_COLOR>            The 'on' color of the screen flash (RRGGBB hex) [default: ffffff]
-      --off-color <OFF_COLOR>          The 'off' color of the screen flash (RRGGBB hex) [default: 000000]
-      --headless                       Run in headless mode (audio only, no visuals)
-      --headless-profile               Run in a headless mode for a few seconds to generate PGO profile data (no audio output)
-  -h, --help                           Print help
-  -V, --version                        Print version
+  -f, --frequency   the primary frequency of the isochronic tone/binaural beat
+                    in Hz.
+  -r, --ramp-duration
+                    the duration of the audio fade-in/out ramp in seconds. Low
+                    values may produce clicks.
+  -a, --amplitude   the audio volume (0.0 to 1.0).
+  -t, --tone-hz     the frequency of the audible sine wave tone in Hz.
+  -b, --binaural    enable binaural beat mode instead of isochronic tones
+  --on-color        the 'on' color of the screen flash (RRGGBB hex).
+  --off-color       the 'off' color of the screen flash (RRGGBB hex).
+  --headless        run in true headless mode (audio only, no window).
+  --headless-profile
+                    run headless for a few seconds to generate PGO profile data
+                    (no audio/window).
+  --minimal-window  run an audio-only session with a minimal window (for GUI
+                    use).
+  --help, help      display usage information
 ```
 
 **Isohcronic Tone Example:** Run a 10 Hz session with a 500 Hz base tone, a very soft/slow audio pulse and low volume.

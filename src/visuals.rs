@@ -102,17 +102,49 @@ fn get_on_ratio(interval_start: f64, interval_end: f64, timing: &TimingState) ->
     on_time_in_interval / interval_duration
 }
 
+
+// For PGO
 pub fn run_headless_profile(timing_state: &TimingState, config: &AppConfig) {
-    let start = Instant::now();
-    let mut current_time = 0.0;
+    let simulation_duration = Duration::from_secs(3);
+    let start_time = Instant::now();
+
+    const AUDIO_BUFFER_SIZE: usize = 512;
+    let sample_rate = 44100.0;
+    let mut engine = audio::AudioEngine::new(sample_rate, timing_state, config);
+    let audio_buffer_duration_secs = AUDIO_BUFFER_SIZE as f64 / sample_rate as f64;
+    let mut next_audio_buffer_time = 0.0;
+    let mut dummy_audio_buffer = vec![(0.0f32, 0.0f32); AUDIO_BUFFER_SIZE];
+
     let frame_time_60fps = 1.0 / 60.0;
-    while Instant::now().duration_since(start) < Duration::from_secs(2) {
-        let on_ratio = black_box(get_on_ratio(current_time, current_time + frame_time_60fps, timing_state)) as f32;
-        let _color = black_box(Color::lerp(config.off_color, config.on_color, on_ratio));
-        current_time += frame_time_60fps;
+    let mut last_frame_time = 0.0;
+    let mut next_video_frame_time = 0.0;
+    let mut dummy_pixel_buffer: Vec<Color> = vec![Color::default(); 854 * 480];
+
+    while Instant::now().duration_since(start_time) < simulation_duration {
+        let elapsed_secs = start_time.elapsed().as_secs_f64();
+
+        if elapsed_secs >= next_audio_buffer_time {
+            for frame in dummy_audio_buffer.iter_mut() {
+                *frame = black_box(engine.next_sample());
+            }
+            next_audio_buffer_time += audio_buffer_duration_secs;
+        }
+
+        if elapsed_secs >= next_video_frame_time {
+            let start_of_frame = last_frame_time;
+            let end_of_frame = elapsed_secs;
+
+            let on_ratio = black_box(get_on_ratio(start_of_frame, end_of_frame, timing_state)) as f32;
+            let color = black_box(Color::lerp(config.off_color, config.on_color, on_ratio));
+
+            dummy_pixel_buffer.fill(black_box(color));
+
+            last_frame_time = elapsed_secs;
+            next_video_frame_time += frame_time_60fps;
+        }
+
+        std::thread::yield_now();
     }
-    let mut engine = audio::AudioEngine::new(44100.0, timing_state, config);
-    for _ in 0..(44100 * 2) { black_box(engine.next_sample()); }
 }
 
 pub fn run_session(config: AppConfig) -> Result<()> {

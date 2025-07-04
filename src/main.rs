@@ -22,7 +22,7 @@ mod visuals;
 pub const MINIMAL_WINDOW_BACKGROUND: Color = Color { r: 0x22, g: 0x22, b: 0x22, a: 0xff };
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Default, Copy, Clone, Debug, Pod, Zeroable)]
 pub struct Color {
     pub r: u8,
     pub g: u8,
@@ -191,7 +191,7 @@ impl eframe::App for ControlPanelApp {
             egui::Grid::new("settings_grid").num_columns(2).spacing([40.0, 4.0]).striped(true).show(ui, |ui| {
                 ui.label("Frequency (Hz):"); ui.add(egui::Slider::new(&mut self.frequency, 0.1..=50.0).logarithmic(true).clamping(SliderClamping::Never)); ui.end_row();
                 ui.label("Tone Frequency (Hz):"); ui.add(egui::Slider::new(&mut self.tone_hz, 20.0..=1000.0).logarithmic(true).clamping(SliderClamping::Never)); ui.end_row();
-                ui.label("Ramp Duration (s):"); ui.add(egui::Slider::new(&mut self.ramp_duration, 0.001..=0.02).logarithmic(true)); ui.end_row();
+                ui.label("Audio Smoothing (s):"); ui.add(egui::Slider::new(&mut self.ramp_duration, 0.001..=0.02).logarithmic(true)); ui.end_row();
                 ui.label("Volume:"); ui.add(egui::Slider::new(&mut self.amplitude, 0.0..=1.0)); ui.end_row();
                 ui.label("On Color:"); ui.color_edit_button_rgb(&mut self.on_color); ui.end_row();
                 ui.label("Off Color:"); ui.color_edit_button_rgb(&mut self.off_color); ui.end_row();
@@ -220,8 +220,16 @@ impl eframe::App for ControlPanelApp {
 
 fn run_gui() -> Result<()> {
     info!("No arguments provided, launching GUI control panel.");
+
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))
+        .expect("The icon data must be valid");
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([400.0, 360.0]).with_resizable(false).with_title("Isochronator Control Panel"),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([400.0, 360.0])
+            .with_resizable(false)
+            .with_title("Isochronator Control Panel")
+            .with_icon(icon),
         ..Default::default()
     };
     eframe::run_native("Isochronator Control Panel", options, Box::new(|_cc| Ok(Box::<ControlPanelApp>::default()))).map_err(|e| anyhow::anyhow!("GUI error: {}", e))
