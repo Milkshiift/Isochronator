@@ -1,3 +1,5 @@
+cargo-features = ["trim-paths"]
+
 [package]
 name = "isochronator"
 version = "1.2.0"
@@ -16,14 +18,15 @@ pixels = "0.15"
 log = "0.4"
 bytemuck = { version = "1.23", features = ["derive"] }
 argh = "0.1"
-eframe = "0.31"
+eframe = "0.32"
 
 [profile.release]
 opt-level = 3
-lto = true
+lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+trim-paths = "all"
 
 [profile.dev]
 opt-level = 1
