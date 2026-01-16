@@ -92,7 +92,7 @@ fn build_audio_stream(
     app_config: &AppConfig,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
     let channels = config.channels as usize;
-    let sample_rate = config.sample_rate.0 as f32;
+    let sample_rate = config.sample_rate as f32;
     let mut engine = AudioEngine::new(sample_rate, &timing_state, app_config);
 
     device.build_output_stream(config, move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
@@ -111,7 +111,7 @@ fn build_audio_stream(
 pub fn setup_audio(timing_state: Arc<TimingState>, config: &AppConfig) -> Result<cpal::Stream> {
     let host = cpal::default_host();
     let device = host.default_output_device().ok_or_else(|| anyhow::anyhow!("No default audio device"))?;
-    info!("Audio output device: {}", device.name()?);
+    info!("Audio output device: {}", device.description()?.name());
     let stream_config = device.default_output_config()?.into();
     let stream = build_audio_stream(&device, &stream_config, timing_state, config)?;
     stream.play()?;

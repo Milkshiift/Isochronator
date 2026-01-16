@@ -13,7 +13,7 @@ A lightweight, cross-platform application for generating **isochronic tones** an
 *   **Visual Stimulus:** The screen flashes in sync with the audio tone.
 *   **Graphical User Interface:** A simple GUI for configuring the tone and visual stimulus parameters.
 *   **Configurable:** Set the primary frequency, base tone, on/off colors, audio ramp time, and volume from the command line.
-*   **Cross-Platform:** Built with `winit`, `pixels`, and `cpal`, it should run on Windows, macOS, and Linux.
+*   **Cross-Platform:** Built with `egui`, `pixels`, and `cpal`, it should run on Windows, macOS, and Linux.
 
 > [!CAUTION]
 > ## HEALTH AND SAFETY WARNING
@@ -81,3 +81,35 @@ cargo run --release -- -f 6 -t 200 --binaural
 ```
 
 If running from a prebuilt binary, replace `cargo run --release --` with `./isochronator`
+
+## A Note on Visual Frequency and Monitor Refresh Rates
+
+A computer screen can only update its image at a fixed rate (e.g., 60, 120, or 144 times per second, or Hz). This poses a challenge when trying to display a visual pulse at a frequency (like 40 Hz) that isn't a simple fraction of the refresh rate. A naive implementation would lead to stuttering, unevenly timed flashes.
+
+This program solves the technical challenge by using **interpolation**. For every single frame the monitor displays, the program calculates the precise *average brightness* that should have been visible during that frame's time window (e.g., 1/60th of a second). This ensures the visual signal is mathematically perfect and smooth.
+
+However, this can lead to two perceptual effects:
+
+#### 1. Aliasing and Beat Frequencies
+
+When the visual frequency is high and gets close to a fraction of the monitor's refresh rate, you may perceive a new, much slower pulse. This is a phenomenon called **aliasing**, or the stroboscopic effect.
+
+**Example:**
+On a **144 Hz** monitor, a **50 Hz** target frequency can produce a slow, visible "beat" of about **6 Hz**. This is because the monitor's frames are "sampling" the 50 Hz brightness wave at a rate that is slightly out of sync.
+
+The math: `3 × 50 Hz = 150 Hz`, which is very close to `144 Hz`. The perceived beat is the difference: `|150 Hz - 144 Hz| = 6 Hz`.
+
+This means that your brain may be drawn to this slower beat frequency instead of the intended 50 Hz, which can alter the entrainment effect.
+
+#### 2. Flicker Fusion Threshold
+
+As the frequency increases (typically above 60-90 Hz for most people), your brain can no longer perceive individual flashes. The light fuses into what appears to be a steady, solid color. At this point, the visual stimulus is no longer isochronic, and any brainwave entrainment will come from the audio only.
+
+### Recommendations
+
+For the clearest and most effective visual stimulus with no confusing beat frequencies, choose a target frequency that is a clean divisor of your monitor's refresh rate and is below or equal to 40 Hz.
+
+Divisors for common refresh rates:
+*   **For a 60 Hz Monitor:** 30, 20, 15, 12, 10 Hz.
+*   **For a 120 Hz Monitor:** 60, 40, 30, 24, 20, 15, 12, 10 Hz.
+*   **For a 144 Hz Monitor:** 72, 48, 36, 24, 18, 12 Hz.

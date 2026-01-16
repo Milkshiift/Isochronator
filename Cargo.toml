@@ -11,14 +11,15 @@ repository = "https://github.com/Milkshiift/Isochronator"
 
 [dependencies]
 winit = "0.30"
-cpal = "0.16"
+cpal = "0.17"
 env_logger = "0.11"
 anyhow = "1.0"
 pixels = "0.15"
 log = "0.4"
-bytemuck = { version = "1.23", features = ["derive"] }
+bytemuck = { version = "1.24", features = ["derive"] }
 argh = "0.1"
-eframe = "0.32"
+wgpu = "27"
+eframe = { version = "0.33", features = ["default_fonts", "wgpu", "wayland", "x11"], default-features = false }
 
 [profile.release]
 opt-level = 3

@@ -189,7 +189,7 @@ impl eframe::App for ControlPanelApp {
             ui.heading("Isochronator Control Panel");
             ui.add_space(10.0);
             egui::Grid::new("settings_grid").num_columns(2).spacing([40.0, 4.0]).striped(true).show(ui, |ui| {
-                ui.label("Frequency (Hz):"); ui.add(egui::Slider::new(&mut self.frequency, 0.1..=50.0).logarithmic(true).clamping(SliderClamping::Never)); ui.end_row();
+                ui.label("Frequency (Hz):"); ui.add(egui::Slider::new(&mut self.frequency, 0.1..=60.0).logarithmic(true).clamping(SliderClamping::Never)); ui.end_row();
                 ui.label("Tone Frequency (Hz):"); ui.add(egui::Slider::new(&mut self.tone_hz, 20.0..=1000.0).logarithmic(true).clamping(SliderClamping::Never)); ui.end_row();
                 ui.label("Audio Smoothing (s):"); ui.add(egui::Slider::new(&mut self.ramp_duration, 0.001..=0.02).logarithmic(true)); ui.end_row();
                 ui.label("Volume:"); ui.add(egui::Slider::new(&mut self.amplitude, 0.0..=1.0)); ui.end_row();
@@ -230,6 +230,8 @@ fn run_gui() -> Result<()> {
             .with_resizable(false)
             .with_title("Isochronator Control Panel")
             .with_icon(icon),
+        renderer: eframe::Renderer::Wgpu,
+
         ..Default::default()
     };
     eframe::run_native("Isochronator Control Panel", options, Box::new(|_cc| Ok(Box::<ControlPanelApp>::default()))).map_err(|e| anyhow::anyhow!("GUI error: {}", e))
