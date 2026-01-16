@@ -19,6 +19,7 @@
           "cargo"
           "rust-src"
           "rustfmt"
+          "clippy"
         ];
       in
       {
