@@ -90,6 +90,7 @@ pub struct AppConfig {
     pub amplitude: f32,
     pub binaural: bool,
     pub minimal_window: bool,
+    pub duty_cycle: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -98,21 +99,26 @@ pub struct TimingState {
     pub frequency: f64,
     pub period_secs: f64,
     pub pulse_duration_secs: f64,
+    pub duty_cycle: f32,
 }
 
 impl TimingState {
-    pub fn new(frequency: f64) -> Self {
+    pub fn new(frequency: f64, duty_cycle: f32) -> Self {
         let period_secs = 1.0 / frequency;
-        let pulse_duration_secs = period_secs * (audio::PULSE_WIDTH as f64);
+        let pulse_duration_secs = period_secs * (duty_cycle as f64);
         info!(
-            "Starting session: {:.2} Hz, period: {:.4}s, pulse: {:.4}s",
-            frequency, period_secs, pulse_duration_secs
+            "Starting session: {:.2} Hz, period: {:.4}s, pulse: {:.4}s, duty: {:.1}%",
+            frequency,
+            period_secs,
+            pulse_duration_secs,
+            (duty_cycle * 100.0)
         );
         Self {
             start_time: Instant::now(),
             frequency,
             period_secs,
             pulse_duration_secs,
+            duty_cycle,
         }
     }
 }
@@ -143,6 +149,10 @@ struct Args {
     /// the frequency of the audible sine wave tone in Hz.
     #[argh(option, short = 't', default = "440.0")]
     tone_hz: f32,
+
+    /// the duty cycle of the isochronic pulse (0.0 to 1.0).
+    #[argh(option, short = 'd', default = "0.5")]
+    duty_cycle: f32,
 
     /// enable binaural beat mode instead of isochronic tones.
     #[argh(switch, short = 'b')]
@@ -180,6 +190,7 @@ impl From<&Args> for AppConfig {
             amplitude: args.amplitude,
             binaural: args.binaural,
             minimal_window: args.minimal_window,
+            duty_cycle: args.duty_cycle.clamp(0.01, 0.99), // Clamp to reasonable range
         }
     }
 }
@@ -189,6 +200,7 @@ struct ControlPanelApp {
     tone_hz: f32,
     ramp_duration: f32,
     amplitude: f32,
+    duty_cycle: f32,
     binaural: bool,
     audio_only: bool,
     on_color: [f32; 3],
@@ -202,6 +214,7 @@ impl Default for ControlPanelApp {
             tone_hz: 440.0,
             ramp_duration: 0.005,
             amplitude: 0.5,
+            duty_cycle: 0.5,
             binaural: false,
             audio_only: false,
             on_color: [1.0, 1.0, 1.0],
@@ -238,6 +251,8 @@ impl ControlPanelApp {
             .arg(self.ramp_duration.to_string())
             .arg("-a")
             .arg(self.amplitude.to_string())
+            .arg("-d")
+            .arg(self.duty_cycle.to_string())
             .arg("--on-color")
             .arg(Self::color_to_hex(self.on_color))
             .arg("--off-color")
@@ -278,6 +293,10 @@ impl eframe::App for ControlPanelApp {
                             .logarithmic(true)
                             .clamping(SliderClamping::Never),
                     );
+                    ui.end_row();
+
+                    ui.label("Duty Cycle:");
+                    ui.add(egui::Slider::new(&mut self.duty_cycle, 0.01..=0.99));
                     ui.end_row();
 
                     ui.label("Smoothing (s):");
@@ -351,7 +370,7 @@ fn main() -> Result<()> {
     }
 
     let config = AppConfig::from(&args);
-    let timing_state = Arc::new(TimingState::new(config.frequency));
+    let timing_state = Arc::new(TimingState::new(config.frequency, config.duty_cycle));
 
     if args.headless_profile {
         visuals::run_headless_profile(&timing_state, &config);

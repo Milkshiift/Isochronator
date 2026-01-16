@@ -1,13 +1,11 @@
 use crate::{AppConfig, TimingState};
 use anyhow::Result;
+use cpal::StreamConfig;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{error, info};
 use std::f32::consts::TAU;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use cpal::StreamConfig;
-
-pub const PULSE_WIDTH: f32 = 0.5;
 
 #[derive(Clone, Copy)]
 struct Oscillator {
@@ -61,7 +59,7 @@ impl AudioEngine {
             right: Oscillator::new(right_freq_bin, sample_rate),
             pulse: Oscillator::new(frequency as f32, sample_rate),
 
-            pulse_width: PULSE_WIDTH,
+            pulse_width: config.duty_cycle,
             inv_ramp: if ramp_duration_ratio > 0.0 {
                 1.0 / ramp_duration_ratio
             } else {
