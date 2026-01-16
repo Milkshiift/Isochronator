@@ -4,6 +4,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{error, info};
 use std::f32::consts::TAU;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use cpal::StreamConfig;
 
 pub const PULSE_WIDTH: f32 = 0.5;
 
@@ -32,10 +34,19 @@ pub struct AudioEngine {
 
     pulse_width: f32,
     inv_ramp: f32,
+
+    // Shared counter for perfect A/V sync
+    frames_written: Arc<AtomicU64>,
 }
 
 impl AudioEngine {
-    pub fn new(sample_rate: f32, frequency: f64, period_secs: f64, config: &AppConfig) -> Self {
+    pub fn new(
+        sample_rate: f32,
+        frequency: f64,
+        period_secs: f64,
+        config: &AppConfig,
+        frames_written: Arc<AtomicU64>,
+    ) -> Self {
         let left_freq = config.tone_hz;
         // Pre-calculate right frequency for Binaural mode
         let right_freq_bin = config.tone_hz + frequency as f32;
@@ -56,6 +67,7 @@ impl AudioEngine {
             } else {
                 0.0
             },
+            frames_written,
         }
     }
 
@@ -65,6 +77,12 @@ impl AudioEngine {
         } else {
             self.process_isochronic(output, channels);
         }
+
+        // Update the atomic counter so the visual thread knows exactly where we are.
+        // Relaxed ordering is sufficient; we just need a monotonic approximation for visuals.
+        let frames = output.len() / channels;
+        self.frames_written
+            .fetch_add(frames as u64, Ordering::Relaxed);
     }
 
     #[inline(always)]
@@ -168,6 +186,7 @@ fn build_audio_stream(
     config: &cpal::StreamConfig,
     timing_state: Arc<TimingState>,
     app_config: &AppConfig,
+    frames_written: Arc<AtomicU64>,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
     let channels = config.channels as usize;
     let sample_rate = config.sample_rate as f32;
@@ -177,6 +196,7 @@ fn build_audio_stream(
         timing_state.frequency,
         timing_state.period_secs,
         app_config,
+        frames_written,
     );
 
     device.build_output_stream(
@@ -189,14 +209,27 @@ fn build_audio_stream(
     )
 }
 
-pub fn setup_audio(timing_state: Arc<TimingState>, config: &AppConfig) -> Result<cpal::Stream> {
+pub fn setup_audio(
+    timing_state: Arc<TimingState>,
+    config: &AppConfig,
+    frames_written: Arc<AtomicU64>,
+) -> Result<(cpal::Stream, u32)> {
     let host = cpal::default_host();
     let device = host
         .default_output_device()
         .ok_or_else(|| anyhow::anyhow!("No default audio device found"))?;
     info!("Audio output device: {}", device.description()?.name());
-    let stream_config = device.default_output_config()?.into();
-    let stream = build_audio_stream(&device, &stream_config, timing_state, config)?;
+    let stream_config: StreamConfig = device.default_output_config()?.into();
+    let sample_rate = stream_config.sample_rate;
+
+    let stream = build_audio_stream(
+        &device,
+        &stream_config,
+        timing_state,
+        config,
+        frames_written,
+    )?;
     stream.play()?;
-    Ok(stream)
+
+    Ok((stream, sample_rate))
 }

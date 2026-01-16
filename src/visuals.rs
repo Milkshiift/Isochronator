@@ -1,5 +1,6 @@
 use std::hint::black_box;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -185,6 +186,8 @@ struct SessionApp {
     audio_stream: Option<cpal::Stream>,
     linear_colors: Option<LinearColors>,
     prev_frame_time: f64,
+    audio_frames: Arc<AtomicU64>,
+    sample_rate: u32,
 }
 
 impl SessionApp {
@@ -200,8 +203,14 @@ impl ApplicationHandler for SessionApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         // Initialize audio first - it's the timing reference
         if self.audio_stream.is_none() {
-            match audio::setup_audio(self.timing.clone(), &self.config) {
-                Ok(s) => self.audio_stream = Some(s),
+            let frames = Arc::new(AtomicU64::new(0));
+            self.audio_frames = frames.clone();
+
+            match audio::setup_audio(self.timing.clone(), &self.config, frames) {
+                Ok((s, sr)) => {
+                    self.audio_stream = Some(s);
+                    self.sample_rate = sr;
+                }
                 Err(e) => {
                     error!("Audio init failed: {e}");
                     event_loop.exit();
@@ -290,10 +299,15 @@ impl ApplicationHandler for SessionApp {
                     return;
                 };
 
-                // Sample time exactly once per frame for consistency
-                let now = Instant::now()
-                    .saturating_duration_since(self.timing.start_time)
-                    .as_secs_f64();
+                // Sample time from audio engine for perfect sync
+                let now = if self.sample_rate > 0 {
+                    self.audio_frames.load(Ordering::Relaxed) as f64 / self.sample_rate as f64
+                } else {
+                    // Fallback should typically not be reached once running
+                    Instant::now()
+                        .saturating_duration_since(self.timing.start_time)
+                        .as_secs_f64()
+                };
 
                 let color = if self.config.minimal_window {
                     wgpu::Color {
@@ -361,8 +375,15 @@ pub fn run_headless_profile(timing: &TimingState, config: &AppConfig) {
 
     let chunks_per_video_frame = (SAMPLE_RATE / BUFFER_SIZE as f32) / 60.0;
 
-    let mut engine =
-        audio::AudioEngine::new(SAMPLE_RATE, timing.frequency, timing.period_secs, config);
+    let dummy_frames = Arc::new(AtomicU64::new(0));
+
+    let mut engine = audio::AudioEngine::new(
+        SAMPLE_RATE,
+        timing.frequency,
+        timing.period_secs,
+        config,
+        dummy_frames,
+    );
 
     let colors = LinearColors::new(config);
 
@@ -412,6 +433,8 @@ pub fn run_session(config: AppConfig, timing: Arc<TimingState>) -> Result<()> {
         audio_stream: None,
         linear_colors: None,
         prev_frame_time: 0.0,
+        audio_frames: Arc::new(AtomicU64::new(0)),
+        sample_rate: 0,
     })?;
     Ok(())
 }

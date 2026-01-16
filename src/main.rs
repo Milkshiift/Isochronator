@@ -12,6 +12,7 @@ use log::{error, info};
 use std::process::Command;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Instant;
 
 mod audio;
@@ -356,7 +357,8 @@ fn main() -> Result<()> {
         visuals::run_headless_profile(&timing_state, &config);
     } else if args.headless {
         info!("Running in true headless (audio-only) mode. Press Ctrl-C to exit.");
-        let _stream = audio::setup_audio(timing_state, &config)?;
+        let frames = Arc::new(AtomicU64::new(0));
+        let _stream = audio::setup_audio(timing_state, &config, frames)?;
         std::thread::park();
     } else {
         visuals::run_session(config, timing_state)?;
