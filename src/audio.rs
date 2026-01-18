@@ -1,233 +1,373 @@
-use crate::{AppConfig, TimingState};
+use crate::program::Program;
 use anyhow::Result;
-use cpal::StreamConfig;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::StreamConfig;
 use log::{error, info};
-use std::f32::consts::TAU;
+use std::f64::consts::TAU;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-#[derive(Clone, Copy)]
-struct Oscillator {
-    phase: f32,
-    inc: f32,
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Sync State
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Shared state for audio-visual synchronization.
+///
+/// The audio thread writes to these atomics; the visual thread reads them
+/// to maintain perfect sync with audio playback.
+pub struct SyncState {
+    /// Total frames written to the audio buffer (monotonically increasing).
+    pub frames_written: AtomicU64,
+
+    /// Current pulse phase [0, 1) as f64 bits.
+    /// For isochronic mode, this is the amplitude envelope phase.
+    /// For binaural mode, this is derived from the beat frequency.
+    pub phase_bits: AtomicU64,
+
+    /// Actual audio buffer size in frames (measured from first callback).
+    pub buffer_frames: AtomicU32,
+
+    /// Audio sample rate in Hz.
+    pub sample_rate: AtomicU32,
 }
 
-impl Oscillator {
-    fn new(freq: f32, sample_rate: f32) -> Self {
+impl SyncState {
+    pub fn new() -> Self {
         Self {
-            phase: 0.0,
-            inc: freq / sample_rate,
+            frames_written: AtomicU64::new(0),
+            phase_bits: AtomicU64::new(0),
+            buffer_frames: AtomicU32::new(0),
+            sample_rate: AtomicU32::new(0),
         }
+    }
+
+    /// Get the current playback time in seconds, accounting for buffer latency.
+    #[inline]
+    pub fn playback_time(&self) -> f64 {
+        let written = self.frames_written.load(Ordering::Acquire);
+        let buffer = self.buffer_frames.load(Ordering::Acquire) as u64;
+        let rate = self.sample_rate.load(Ordering::Acquire);
+
+        if rate == 0 {
+            return 0.0;
+        }
+
+        let played = written.saturating_sub(buffer);
+        played as f64 / f64::from(rate)
+    }
+
+    /// Get the current pulse phase, compensated for buffer latency.
+    #[inline]
+    pub fn visual_phase(&self, freq: f64) -> f64 {
+        let raw_phase = f64::from_bits(self.phase_bits.load(Ordering::Acquire));
+        let buffer = self.buffer_frames.load(Ordering::Acquire);
+        let rate = self.sample_rate.load(Ordering::Acquire);
+
+        if rate == 0 {
+            return 0.0;
+        }
+
+        // Rewind phase by buffer latency
+        let latency_secs = f64::from(buffer) / f64::from(rate);
+        let phase_offset = freq * latency_secs;
+
+        (raw_phase - phase_offset).rem_euclid(1.0)
     }
 }
 
+impl Default for SyncState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Audio Engine
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Audio synthesis engine.
+///
+/// Processes audio buffers and maintains oscillator state.
 pub struct AudioEngine {
-    amplitude: f32,
-    binaural: bool,
+    sample_rate: f64,
+    program: Arc<Program>,
+    sync: Arc<SyncState>,
 
-    left: Oscillator,
-    right: Oscillator,
-    pulse: Oscillator,
+    // Oscillator phases (f64 for long-session precision)
+    left_phase: f64,
+    right_phase: f64,
+    pulse_phase: f64,
 
-    pulse_width: f32,
-    inv_ramp: f32,
-
-    // Shared counter for perfect A/V sync
-    frames_written: Arc<AtomicU64>,
+    // Frame counter for time calculation
+    frame_count: u64,
 }
 
 impl AudioEngine {
-    pub fn new(
-        sample_rate: f32,
-        frequency: f64,
-        period_secs: f64,
-        config: &AppConfig,
-        frames_written: Arc<AtomicU64>,
-    ) -> Self {
-        let left_freq = config.tone_hz;
-        // Pre-calculate right frequency for Binaural mode
-        let right_freq_bin = config.tone_hz + frequency as f32;
-
-        let ramp_duration_ratio = (config.ramp_duration / period_secs as f32).min(0.5);
-
+    pub fn new(sample_rate: f64, program: Arc<Program>, sync: Arc<SyncState>) -> Self {
         Self {
-            amplitude: config.amplitude,
-            binaural: config.binaural,
-
-            left: Oscillator::new(left_freq, sample_rate),
-            right: Oscillator::new(right_freq_bin, sample_rate),
-            pulse: Oscillator::new(frequency as f32, sample_rate),
-
-            pulse_width: config.duty_cycle,
-            inv_ramp: if ramp_duration_ratio > 0.0 {
-                1.0 / ramp_duration_ratio
-            } else {
-                0.0
-            },
-            frames_written,
+            sample_rate,
+            program,
+            sync,
+            left_phase: 0.0,
+            right_phase: 0.0,
+            pulse_phase: 0.0,
+            frame_count: 0,
         }
     }
 
-    pub fn process_buffer(&mut self, output: &mut [f32], channels: usize) {
-        if self.binaural {
-            self.process_binaural(output, channels);
+    /// Process an audio buffer. Called from the audio thread.
+    pub fn process(&mut self, output: &mut [f32], channels: usize) {
+        let frame_count = output.len() / channels;
+        if frame_count == 0 {
+            return;
+        }
+
+        // Update buffer size on first call (for latency compensation)
+        if self.sync.buffer_frames.load(Ordering::Relaxed) == 0 {
+            self.sync.buffer_frames.store(frame_count as u32, Ordering::Release);
+        }
+
+        // Calculate time range for this buffer
+        let t_start = self.frame_count as f64 / self.sample_rate;
+        let t_end = (self.frame_count + frame_count as u64) as f64 / self.sample_rate;
+
+        // Get interpolated parameters at buffer boundaries
+        let p_start = self.program.params_at(t_start);
+        let p_end = self.program.params_at(t_end);
+
+        // Dispatch to appropriate synthesis method
+        if self.program.settings.binaural {
+            self.process_binaural(output, channels, &p_start, &p_end);
         } else {
-            self.process_isochronic(output, channels);
+            self.process_isochronic(output, channels, &p_start, &p_end);
         }
 
-        // Update the atomic counter so the visual thread knows exactly where we are.
-        // Relaxed ordering is sufficient; we just need a monotonic approximation for visuals.
-        let frames = output.len() / channels;
-        self.frames_written
-            .fetch_add(frames as u64, Ordering::Relaxed);
+        // Update frame counter
+        self.frame_count += frame_count as u64;
+
+        // Publish sync state
+        self.sync.frames_written.store(self.frame_count, Ordering::Release);
+        self.sync.phase_bits.store(self.pulse_phase.to_bits(), Ordering::Release);
     }
 
-    #[inline(always)]
-    fn process_binaural(&mut self, output: &mut [f32], channels: usize) {
-        // Load state into local variables (CPU registers)
-        let mut l_phase = self.left.phase;
-        let l_inc = self.left.inc;
-        let mut r_phase = self.right.phase;
-        let r_inc = self.right.inc;
-        let amp = self.amplitude;
+    /// Generate binaural beats (stereo frequency difference).
+    fn process_binaural(
+        &mut self,
+        output: &mut [f32],
+        channels: usize,
+        p_start: &crate::program::Params,
+        p_end: &crate::program::Params,
+    ) {
+        let frame_count = output.len() / channels;
+        let inv_len = 1.0 / frame_count as f64;
+        let inv_sr = 1.0 / self.sample_rate;
 
-        // Process directly on the slice.
-        // No "if" checks inside here. Just math.
-        for frame in output.chunks_exact_mut(channels) {
-            let l_val = (l_phase * TAU).sin();
-            let r_val = (r_phase * TAU).sin();
+        let mut l_phase = self.left_phase;
+        let mut r_phase = self.right_phase;
 
-            // Interleave Output
+        for (i, frame) in output.chunks_exact_mut(channels).enumerate() {
+            // Linear parameter interpolation within buffer
+            let t = i as f64 * inv_len;
+
+            let vol = f64::from(p_start.vol) + f64::from(p_end.vol - p_start.vol) * t;
+            let tone = f64::from(p_start.tone) + f64::from(p_end.tone - p_start.tone) * t;
+            let freq = p_start.freq + (p_end.freq - p_start.freq) * t;
+
+            // Left channel: base tone, Right channel: base + beat frequency
+            let l_inc = tone * inv_sr;
+            let r_inc = (tone + freq) * inv_sr;
+
+            let l_sample = (l_phase * TAU).sin() * vol;
+            let r_sample = (r_phase * TAU).sin() * vol;
+
+            frame[0] = l_sample as f32;
             if channels >= 2 {
-                frame[0] = l_val * amp;
-                frame[1] = r_val * amp;
-            } else {
-                frame[0] = ((l_val + r_val) * 0.5) * amp;
+                frame[1] = r_sample as f32;
             }
 
-            // Phase Updates
-            l_phase += l_inc;
-            if l_phase >= 1.0 {
-                l_phase -= 1.0;
-            }
-            r_phase += r_inc;
-            if r_phase >= 1.0 {
-                r_phase -= 1.0;
-            }
+            // Advance phases (keep in [0, 1) for numerical stability)
+            l_phase = (l_phase + l_inc).fract();
+            r_phase = (r_phase + r_inc).fract();
         }
 
-        // Save state back
-        self.left.phase = l_phase;
-        self.right.phase = r_phase;
+        self.left_phase = l_phase;
+        self.right_phase = r_phase;
+
+        // For binaural, pulse_phase tracks the beat phase for visual sync
+        let avg_freq = (p_start.freq + p_end.freq) * 0.5;
+        let phase_inc = avg_freq * (frame_count as f64 / self.sample_rate);
+        self.pulse_phase = (self.pulse_phase + phase_inc).fract();
     }
 
-    #[inline(always)]
-    fn process_isochronic(&mut self, output: &mut [f32], channels: usize) {
-        let mut l_phase = self.left.phase;
-        let l_inc = self.left.inc;
-        let mut p_phase = self.pulse.phase;
-        let p_inc = self.pulse.inc;
+    /// Generate isochronic tones (amplitude-modulated carrier).
+    fn process_isochronic(
+        &mut self,
+        output: &mut [f32],
+        channels: usize,
+        p_start: &crate::program::Params,
+        p_end: &crate::program::Params,
+    ) {
+        let frame_count = output.len() / channels;
+        let inv_len = 1.0 / frame_count as f64;
+        let inv_sr = 1.0 / self.sample_rate;
 
-        let p_width = self.pulse_width;
-        let inv_ramp = self.inv_ramp;
-        let amp = self.amplitude;
+        let mut tone_phase = self.left_phase;
+        let mut pulse_phase = self.pulse_phase;
 
-        for frame in output.chunks_exact_mut(channels) {
-            // 1. Calculate Carrier Tone (Left only, saves 50% trig calls)
-            let raw_tone = (l_phase * TAU).sin();
+        for (i, frame) in output.chunks_exact_mut(channels).enumerate() {
+            // Linear parameter interpolation within buffer
+            let t = i as f64 * inv_len;
 
-            // 2. Calculate Envelope (Branchless-ish)
-            let envelope = if p_phase > p_width {
+            let vol = f64::from(p_start.vol) + f64::from(p_end.vol - p_start.vol) * t;
+            let tone = f64::from(p_start.tone) + f64::from(p_end.tone - p_start.tone) * t;
+            let freq = p_start.freq + (p_end.freq - p_start.freq) * t;
+            let duty = f64::from(p_start.duty) + f64::from(p_end.duty - p_start.duty) * t;
+
+            // Phase increments
+            let tone_inc = tone * inv_sr;
+            let pulse_inc = freq * inv_sr;
+
+            // Generate carrier tone
+            let carrier = (tone_phase * TAU).sin();
+
+            // Generate smooth envelope to avoid clicks
+            // Ramp duration is 10% of period or half the duty cycle, whichever is smaller
+            let ramp = 0.1_f64.min(duty * 0.5);
+            let inv_ramp = if ramp > 1e-9 { 1.0 / ramp } else { 1e9 };
+
+            let envelope = if pulse_phase >= duty {
                 0.0
             } else {
-                let up = p_phase * inv_ramp;
-                let down = (p_width - p_phase) * inv_ramp;
-                // Branchless min
-                let linear = if up < down { up } else { down };
-
-                if linear >= 1.0 {
-                    1.0
-                } else {
-                    // Hermite SmoothStep
-                    linear * linear * (3.0 - 2.0 * linear)
-                }
+                // Trapezoidal envelope with smooth edges
+                let attack = (pulse_phase * inv_ramp).min(1.0);
+                let release = ((duty - pulse_phase) * inv_ramp).min(1.0);
+                let linear = attack.min(release);
+                // Apply smoothstep for softer transitions
+                linear * linear * (3.0 - 2.0 * linear)
             };
 
-            let final_val = raw_tone * envelope * amp;
+            let sample = (carrier * envelope * vol) as f32;
 
+            frame[0] = sample;
             if channels >= 2 {
-                frame[0] = final_val;
-                frame[1] = final_val;
-            } else {
-                frame[0] = final_val;
+                frame[1] = sample;
             }
 
-            // Phase Updates
-            l_phase += l_inc;
-            if l_phase >= 1.0 {
-                l_phase -= 1.0;
-            }
-            p_phase += p_inc;
-            if p_phase >= 1.0 {
-                p_phase -= 1.0;
-            }
+            // Advance phases
+            tone_phase = (tone_phase + tone_inc).fract();
+            pulse_phase = (pulse_phase + pulse_inc).fract();
         }
 
-        self.left.phase = l_phase;
-        self.pulse.phase = p_phase;
+        self.left_phase = tone_phase;
+        self.pulse_phase = pulse_phase;
     }
 }
 
-fn build_audio_stream(
-    device: &cpal::Device,
-    config: &cpal::StreamConfig,
-    timing_state: Arc<TimingState>,
-    app_config: &AppConfig,
-    frames_written: Arc<AtomicU64>,
-) -> Result<cpal::Stream, cpal::BuildStreamError> {
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Audio Setup
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Initialize audio output and start playback.
+///
+/// Returns the stream handle (must be kept alive) and initializes the sync state.
+pub fn start(program: Arc<Program>, sync: Arc<SyncState>) -> Result<cpal::Stream> {
+    let host = cpal::default_host();
+
+    let device = host
+        .default_output_device()
+        .ok_or_else(|| anyhow::anyhow!("No audio output device available"))?;
+
+    let device_name = device.description().map(|d| d.name().to_owned())?;
+    info!("Audio device: {device_name}");
+
+    let config: StreamConfig = device.default_output_config()?.into();
+    let sample_rate = config.sample_rate;
     let channels = config.channels as usize;
-    let sample_rate = config.sample_rate as f32;
 
-    let mut engine = AudioEngine::new(
-        sample_rate,
-        timing_state.frequency,
-        timing_state.period_secs,
-        app_config,
-        frames_written,
-    );
+    info!("Audio config: {sample_rate} Hz, {channels} channels");
 
-    device.build_output_stream(
-        config,
-        move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            engine.process_buffer(data, channels);
+    // Store sample rate in sync state
+    sync.sample_rate.store(sample_rate, Ordering::Release);
+
+    // Create engine
+    let mut engine = AudioEngine::new(f64::from(sample_rate), program, sync);
+
+    // Build and start stream
+    let stream = device.build_output_stream(
+        &config,
+        move |data: &mut [f32], _info| {
+            engine.process(data, channels);
         },
         |err| error!("Audio stream error: {err}"),
         None,
-    )
-}
-
-pub fn setup_audio(
-    timing_state: Arc<TimingState>,
-    config: &AppConfig,
-    frames_written: Arc<AtomicU64>,
-) -> Result<(cpal::Stream, u32)> {
-    let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or_else(|| anyhow::anyhow!("No default audio device found"))?;
-    info!("Audio output device: {}", device.description()?.name());
-    let stream_config: StreamConfig = device.default_output_config()?.into();
-    let sample_rate = stream_config.sample_rate;
-
-    let stream = build_audio_stream(
-        &device,
-        &stream_config,
-        timing_state,
-        config,
-        frames_written,
     )?;
+
     stream.play()?;
 
-    Ok((stream, sample_rate))
+    Ok(stream)
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Tests
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::program::{Params, Settings};
+
+    fn test_program() -> Arc<Program> {
+        Arc::new(Program::constant(Params::default(), Settings::default()))
+    }
+
+    #[test]
+    fn engine_produces_output() {
+        let sync = Arc::new(SyncState::new());
+        let mut engine = AudioEngine::new(48000.0, test_program(), sync.clone());
+
+        let mut buffer = vec![0.0f32; 1024];
+        engine.process(&mut buffer, 2);
+
+        // Should have written some non-zero samples
+        assert!(buffer.iter().any(|&s| s.abs() > 0.001));
+
+        // Sync state should be updated
+        assert!(sync.frames_written.load(Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn phase_wraps_correctly() {
+        let sync = Arc::new(SyncState::new());
+        let mut engine = AudioEngine::new(48000.0, test_program(), sync);
+
+        let mut buffer = vec![0.0f32; 48000]; // 1 second of audio
+
+        // Process many buffers to accumulate phase
+        for _ in 0..100 {
+            engine.process(&mut buffer, 2);
+        }
+
+        // Phases should remain in [0, 1)
+        assert!(engine.left_phase >= 0.0 && engine.left_phase < 1.0);
+        assert!(engine.pulse_phase >= 0.0 && engine.pulse_phase < 1.0);
+    }
+
+    #[test]
+    fn sync_state_latency_compensation() {
+        let sync = SyncState::new();
+        sync.sample_rate.store(48000, Ordering::Relaxed);
+        sync.buffer_frames.store(1024, Ordering::Relaxed);
+        sync.frames_written.store(48000, Ordering::Relaxed); // 1 second written
+        sync.phase_bits.store(0.5_f64.to_bits(), Ordering::Relaxed);
+
+        // Playback time should be ~1 second minus buffer latency
+        let time = sync.playback_time();
+        let expected = 1.0 - (1024.0 / 48000.0);
+        assert!((time - expected).abs() < 0.001);
+
+        // Visual phase at 10 Hz should be rewound by latency
+        let phase = sync.visual_phase(10.0);
+        // 10 Hz * (1024/48000) seconds = ~0.213 cycles offset
+        assert!(phase >= 0.0 && phase < 1.0);
+    }
 }

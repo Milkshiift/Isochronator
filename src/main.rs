@@ -1,25 +1,30 @@
+#![windows_subsystem = "windows"]
 #![forbid(unsafe_code)]
-#![feature(test)]
-extern crate test;
 
 use anyhow::{Context, Result};
 use argh::FromArgs;
 use bytemuck::{Pod, Zeroable};
 use eframe::egui;
-use eframe::egui::SliderClamping;
 use env_logger::Env;
-use log::{error, info};
-use std::process::Command;
+use log::info;
+use std::path::PathBuf;
+use std::process::{Child, Command};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
-use std::time::Instant;
 
 mod audio;
+mod program;
 mod visuals;
 
+use program::{Params, Program, Settings};
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Color
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// RGBA color in sRGB color space.
 #[repr(C)]
-#[derive(Default, Copy, Clone, Debug, Pod, Zeroable, PartialEq)]
+#[derive(Default, Copy, Clone, Debug, Pod, Zeroable, PartialEq, Eq)]
 pub struct Color {
     pub r: u8,
     pub g: u8,
@@ -28,39 +33,59 @@ pub struct Color {
 }
 
 impl Color {
-    pub const WHITE: Self = Self {
-        r: 255,
-        g: 255,
-        b: 255,
-        a: 255,
-    };
-    pub const BLACK: Self = Self {
-        r: 0,
-        g: 0,
-        b: 0,
-        a: 255,
-    };
+    pub const WHITE: Self = Self { r: 255, g: 255, b: 255, a: 255 };
+    pub const BLACK: Self = Self { r: 0, g: 0, b: 0, a: 255 };
 
-    pub fn lerp(start: Color, end: Color, t: f32) -> Self {
-        let t = t.clamp(0.0, 1.0);
-        let r = start.r as f32 + (end.r as f32 - start.r as f32) * t;
-        let g = start.g as f32 + (end.g as f32 - start.g as f32) * t;
-        let b = start.b as f32 + (end.b as f32 - start.b as f32) * t;
-        Self {
-            r: r as u8,
-            g: g as u8,
-            b: b as u8,
-            a: 0xff,
+    /// Convert to egui color format.
+    #[inline]
+    pub const fn to_egui(self) -> egui::Color32 {
+        egui::Color32::from_rgba_premultiplied(self.r, self.g, self.b, self.a)
+    }
+
+    /// Convert sRGB component to linear light.
+    #[inline]
+    fn srgb_to_linear(v: u8) -> f64 {
+        let v = f64::from(v) / 255.0;
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
         }
     }
 
-    /// Converts the Color to linear [r, g, b, a] f32 array for WGPU usage.
-    pub fn to_linear_f32(&self) -> [f32; 4] {
+    /// Convert linear light to sRGB component.
+    #[inline]
+    fn linear_to_srgb(v: f64) -> u8 {
+        let v = if v <= 0.0031308 {
+            v * 12.92
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        };
+        (v.clamp(0.0, 1.0) * 255.0).round() as u8
+    }
+
+    /// Perceptually correct linear interpolation between two colors.
+    /// Converts to linear space, interpolates, then back to sRGB.
+    #[inline]
+    pub fn lerp(a: Self, b: Self, t: f32) -> Self {
+        let t = f64::from(t.clamp(0.0, 1.0));
+        let inv = 1.0 - t;
+
+        Self {
+            r: Self::linear_to_srgb(Self::srgb_to_linear(a.r) * inv + Self::srgb_to_linear(b.r) * t),
+            g: Self::linear_to_srgb(Self::srgb_to_linear(a.g) * inv + Self::srgb_to_linear(b.g) * t),
+            b: Self::linear_to_srgb(Self::srgb_to_linear(a.b) * inv + Self::srgb_to_linear(b.b) * t),
+            a: 255,
+        }
+    }
+
+    /// Convert to linear RGB for GPU operations.
+    #[inline]
+    pub fn to_linear(self) -> [f64; 3] {
         [
-            self.r as f32 / 255.0,
-            self.g as f32 / 255.0,
-            self.b as f32 / 255.0,
-            self.a as f32 / 255.0,
+            Self::srgb_to_linear(self.r),
+            Self::srgb_to_linear(self.g),
+            Self::srgb_to_linear(self.b),
         ]
     }
 }
@@ -71,317 +96,356 @@ impl FromStr for Color {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.strip_prefix('#').unwrap_or(s);
         if s.len() != 6 {
-            return Err("Color must be a 6-digit hex string (e.g., FF0000)".to_string());
+            return Err("expected #RRGGBB format".into());
         }
-        let r = u8::from_str_radix(&s[0..2], 16).map_err(|e| e.to_string())?;
-        let g = u8::from_str_radix(&s[2..4], 16).map_err(|e| e.to_string())?;
-        let b = u8::from_str_radix(&s[4..6], 16).map_err(|e| e.to_string())?;
-        Ok(Color { r, g, b, a: 0xff })
+        Ok(Self {
+            r: u8::from_str_radix(&s[0..2], 16).map_err(|e| format!("red: {e}"))?,
+            g: u8::from_str_radix(&s[2..4], 16).map_err(|e| format!("green: {e}"))?,
+            b: u8::from_str_radix(&s[4..6], 16).map_err(|e| format!("blue: {e}"))?,
+            a: 255,
+        })
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct AppConfig {
-    pub frequency: f64,
-    pub tone_hz: f32,
-    pub on_color: Color,
-    pub off_color: Color,
-    pub ramp_duration: f32,
-    pub amplitude: f32,
-    pub binaural: bool,
-    pub minimal_window: bool,
-    pub duty_cycle: f32,
-}
-
-#[derive(Debug, Clone)]
-pub struct TimingState {
-    pub start_time: Instant,
-    pub frequency: f64,
-    pub period_secs: f64,
-    pub pulse_duration_secs: f64,
-    pub duty_cycle: f32,
-}
-
-impl TimingState {
-    pub fn new(frequency: f64, duty_cycle: f32) -> Self {
-        let period_secs = 1.0 / frequency;
-        let pulse_duration_secs = period_secs * (duty_cycle as f64);
-        info!(
-            "Starting session: {:.2} Hz, period: {:.4}s, pulse: {:.4}s, duty: {:.1}%",
-            frequency,
-            period_secs,
-            pulse_duration_secs,
-            (duty_cycle * 100.0)
-        );
-        Self {
-            start_time: Instant::now(),
-            frequency,
-            period_secs,
-            pulse_duration_secs,
-            duty_cycle,
-        }
-    }
-}
-
-fn default_on_color() -> Color {
-    Color::WHITE
-}
-fn default_off_color() -> Color {
-    Color::BLACK
-}
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// CLI
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 #[derive(FromArgs, Debug)]
-/// A simple isochronic/binaural tone and visual stimulus generator.
-/// Run without arguments for a GUI control panel.
+/// Brain entrainment with isochronic/binaural audio and visual stimulation.
 struct Args {
-    /// the primary frequency of the isochronic tone/binaural beat in Hz.
-    #[argh(option, short = 'f', default = "20.0")]
-    frequency: f64,
+    /// program file path (.ent format)
+    #[argh(positional)]
+    program: Option<PathBuf>,
 
-    /// the duration of the audio fade-in/out ramp in seconds.
-    #[argh(option, short = 'r', default = "0.005")]
-    ramp_duration: f32,
-
-    /// the audio volume (0.0 to 1.0).
-    #[argh(option, short = 'a', default = "0.5")]
-    amplitude: f32,
-
-    /// the frequency of the audible sine wave tone in Hz.
-    #[argh(option, short = 't', default = "440.0")]
-    tone_hz: f32,
-
-    /// the duty cycle of the isochronic pulse (0.0 to 1.0).
-    #[argh(option, short = 'd', default = "0.5")]
-    duty_cycle: f32,
-
-    /// enable binaural beat mode instead of isochronic tones.
-    #[argh(switch, short = 'b')]
-    binaural: bool,
-
-    /// the 'on' color of the screen flash (RRGGBB hex).
-    #[argh(option, default = "default_on_color()")]
-    on_color: Color,
-
-    /// the 'off' color of the screen flash (RRGGBB hex).
-    #[argh(option, default = "default_off_color()")]
-    off_color: Color,
-
-    /// run in true headless mode (audio only, no window).
+    /// run profiling workload for PGO optimization
     #[argh(switch)]
-    headless: bool,
-
-    /// run headless for a few seconds to generate PGO profile data.
-    #[argh(switch)]
-    headless_profile: bool,
-
-    #[argh(switch)]
-    /// run an audio-only session with a minimal window (for GUI use).
-    minimal_window: bool,
+    profile: bool,
 }
 
-impl From<&Args> for AppConfig {
-    fn from(args: &Args) -> Self {
-        Self {
-            frequency: args.frequency,
-            tone_hz: args.tone_hz,
-            on_color: args.on_color,
-            off_color: args.off_color,
-            ramp_duration: args.ramp_duration,
-            amplitude: args.amplitude,
-            binaural: args.binaural,
-            minimal_window: args.minimal_window,
-            duty_cycle: args.duty_cycle.clamp(0.01, 0.99), // Clamp to reasonable range
-        }
-    }
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// GUI
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+const DEFAULT_PROGRAM: &str = r#"
+// Example entrainment program
+// Starts with alpha (10 Hz), transitions to theta (6 Hz), then fades out
+
+00:00 freq=10 tone=200 vol=0.0 duty=0.5 on=#FFFFFF off=#000000
+00:05 vol=0.8 >linear
+01:00 freq=6 >smooth
+02:00 vol=0.0 >linear
+"#;
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum GuiMode {
+    Simple,
+    Program,
 }
 
-struct ControlPanelApp {
-    frequency: f64,
-    tone_hz: f32,
-    ramp_duration: f32,
-    amplitude: f32,
-    duty_cycle: f32,
-    binaural: bool,
-    audio_only: bool,
+struct ControlPanel {
+    mode: GuiMode,
+
+    // Simple mode parameters
+    freq: f64,
+    tone: f32,
+    vol: f32,
+    duty: f32,
     on_color: [f32; 3],
     off_color: [f32; 3],
+    binaural: bool,
+    headless: bool,
+
+    // Program mode state
+    program_text: String,
+    program_error: Option<String>,
+
+    // Active session management
+    active_session: Option<Child>,
 }
 
-impl Default for ControlPanelApp {
+impl Default for ControlPanel {
     fn default() -> Self {
         Self {
-            frequency: 20.0,
-            tone_hz: 440.0,
-            ramp_duration: 0.005,
-            amplitude: 0.5,
-            duty_cycle: 0.5,
-            binaural: false,
-            audio_only: false,
+            mode: GuiMode::Simple,
+            freq: 10.0,
+            tone: 200.0,
+            vol: 0.5,
+            duty: 0.5,
             on_color: [1.0, 1.0, 1.0],
             off_color: [0.0, 0.0, 0.0],
+            binaural: false,
+            headless: false,
+            program_text: DEFAULT_PROGRAM.trim().into(),
+            program_error: None,
+            active_session: None,
         }
     }
 }
 
-impl ControlPanelApp {
-    fn color_to_hex(color: [f32; 3]) -> String {
-        let r = (color[0] * 255.0) as u8;
-        let g = (color[1] * 255.0) as u8;
-        let b = (color[2] * 255.0) as u8;
-        format!("{r:02X}{g:02X}{b:02X}")
+impl ControlPanel {
+    /// Build a constant program from simple mode settings.
+    fn build_simple_program(&self) -> Program {
+        let params = Params {
+            freq: self.freq,
+            tone: self.tone,
+            vol: self.vol,
+            duty: self.duty.clamp(0.01, 0.99),
+            on: Color {
+                r: (self.on_color[0] * 255.0) as u8,
+                g: (self.on_color[1] * 255.0) as u8,
+                b: (self.on_color[2] * 255.0) as u8,
+                a: 255,
+            },
+            off: Color {
+                r: (self.off_color[0] * 255.0) as u8,
+                g: (self.off_color[1] * 255.0) as u8,
+                b: (self.off_color[2] * 255.0) as u8,
+                a: 255,
+            },
+        };
+        Program::constant(
+            params,
+            Settings {
+                binaural: self.binaural,
+                headless: self.headless,
+            },
+        )
     }
 
-    fn launch_session(&self) {
-        let Ok(exe) = std::env::current_exe() else {
-            error!("Failed to get current executable path");
-            return;
+    /// Convert simple mode settings to program text.
+    fn sync_to_text(&mut self) {
+        self.program_text = self.build_simple_program().to_source();
+        self.program_error = None;
+    }
+
+    /// Launch a new entrainment session.
+    fn launch(&mut self) {
+        self.stop();
+
+        let source = match self.mode {
+            GuiMode::Simple => self.build_simple_program().to_source(),
+            GuiMode::Program => self.program_text.clone(),
         };
 
-        let mut command = Command::new(exe);
-        if self.audio_only {
-            command.arg("--minimal-window");
+        // Validate program syntax
+        if let Err(e) = Program::parse(&source) {
+            self.program_error = Some(format!("Parse error: {e}"));
+            return;
+        }
+        self.program_error = None;
+
+        // Write to temporary file
+        let mut path = std::env::temp_dir();
+        path.push("isochronator_session.ent");
+
+        if let Err(e) = std::fs::write(&path, &source) {
+            self.program_error = Some(format!("Failed to write temp file: {e}"));
+            return;
         }
 
-        command
-            .arg("-f")
-            .arg(self.frequency.to_string())
-            .arg("-t")
-            .arg(self.tone_hz.to_string())
-            .arg("-r")
-            .arg(self.ramp_duration.to_string())
-            .arg("-a")
-            .arg(self.amplitude.to_string())
-            .arg("-d")
-            .arg(self.duty_cycle.to_string())
-            .arg("--on-color")
-            .arg(Self::color_to_hex(self.on_color))
-            .arg("--off-color")
-            .arg(Self::color_to_hex(self.off_color));
+        // Spawn session process
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("isochronator"));
 
-        if self.binaural {
-            command.arg("-b");
+        match Command::new(&exe).arg(&path).spawn() {
+            Ok(child) => {
+                info!("Launched session: {:?} {:?}", exe, path);
+                self.active_session = Some(child);
+            }
+            Err(e) => {
+                self.program_error = Some(format!("Failed to spawn process: {e}"));
+            }
         }
+    }
 
-        if let Err(e) = command.spawn() {
-            error!("Failed to launch session: {}", e);
+    /// Stop the active session if running.
+    fn stop(&mut self) {
+        if let Some(mut child) = self.active_session.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+            info!("Session stopped");
+        }
+    }
+
+    /// Poll and clean up finished child processes.
+    fn poll_session(&mut self) {
+        if let Some(child) = &mut self.active_session {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                self.active_session = None;
+            }
         }
     }
 }
 
-impl eframe::App for ControlPanelApp {
+impl eframe::App for ControlPanel {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_session();
+
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Isochronator Control Panel");
-            ui.add_space(10.0);
-
-            egui::Grid::new("settings_grid")
-                .num_columns(2)
-                .spacing([40.0, 8.0])
-                .striped(true)
-                .show(ui, |ui| {
-                    ui.label("Frequency (Hz):");
-                    ui.add(
-                        egui::Slider::new(&mut self.frequency, 0.1..=60.0)
-                            .logarithmic(true)
-                            .clamping(SliderClamping::Never),
-                    );
-                    ui.end_row();
-
-                    ui.label("Tone Frequency (Hz):");
-                    ui.add(
-                        egui::Slider::new(&mut self.tone_hz, 20.0..=1000.0)
-                            .logarithmic(true)
-                            .clamping(SliderClamping::Never),
-                    );
-                    ui.end_row();
-
-                    ui.label("Duty Cycle:");
-                    ui.add(egui::Slider::new(&mut self.duty_cycle, 0.01..=0.99));
-                    ui.end_row();
-
-                    ui.label("Smoothing (s):");
-                    ui.add(
-                        egui::Slider::new(&mut self.ramp_duration, 0.001..=0.02).logarithmic(true),
-                    );
-                    ui.end_row();
-
-                    ui.label("Volume:");
-                    ui.add(egui::Slider::new(&mut self.amplitude, 0.0..=1.0));
-                    ui.end_row();
-
-                    ui.label("On Color:");
-                    ui.color_edit_button_rgb(&mut self.on_color);
-                    ui.end_row();
-
-                    ui.label("Off Color:");
-                    ui.color_edit_button_rgb(&mut self.off_color);
-                    ui.end_row();
+            // Header
+            ui.horizontal(|ui| {
+                ui.heading("🧠 Isochronator");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.selectable_value(&mut self.mode, GuiMode::Program, "📝 Program");
+                    ui.selectable_value(&mut self.mode, GuiMode::Simple, "🎛️ Simple");
                 });
+            });
+            ui.separator();
 
-            ui.add_space(10.0);
-            ui.checkbox(&mut self.binaural, "Binaural Mode");
-            ui.checkbox(&mut self.audio_only, "Audio Only (Minimal Window)");
-            ui.add_space(20.0);
-
-            if ui.button("Launch Session").clicked() {
-                self.launch_session();
+            // Content based on mode
+            match self.mode {
+                GuiMode::Simple => self.ui_simple_mode(ui),
+                GuiMode::Program => self.ui_program_mode(ui),
             }
+
+            ui.add_space(12.0);
+            ui.separator();
+
+            // Controls
+            ui.horizontal(|ui| {
+                if self.active_session.is_some() {
+                    if ui.button("⏹ Stop Session").clicked() {
+                        self.stop();
+                    }
+                    ui.spinner();
+                    ui.label("Session running...");
+                } else if ui.button("▶ Launch Session").clicked() {
+                    self.launch();
+                }
+
+                if let Some(err) = &self.program_error {
+                    ui.colored_label(egui::Color32::RED, err);
+                }
+            });
+        });
+    }
+
+    fn on_exit(&mut self) {
+        self.stop();
+    }
+}
+
+impl ControlPanel {
+    fn ui_simple_mode(&mut self, ui: &mut egui::Ui) {
+        egui::Grid::new("simple_grid")
+            .num_columns(2)
+            .spacing([20.0, 8.0])
+            .striped(true)
+            .show(ui, |ui| {
+                ui.label("Frequency (Hz)");
+                ui.add(egui::Slider::new(&mut self.freq, 0.5..=50.0).logarithmic(true));
+                ui.end_row();
+
+                ui.label("Carrier Tone (Hz)");
+                ui.add(egui::Slider::new(&mut self.tone, 50.0..=500.0).logarithmic(true));
+                ui.end_row();
+
+                ui.label("Volume");
+                ui.add(egui::Slider::new(&mut self.vol, 0.0..=1.0));
+                ui.end_row();
+
+                ui.label("Duty Cycle");
+                ui.add(egui::Slider::new(&mut self.duty, 0.1..=0.9));
+                ui.end_row();
+
+                ui.label("On Color");
+                ui.color_edit_button_rgb(&mut self.on_color);
+                ui.end_row();
+
+                ui.label("Off Color");
+                ui.color_edit_button_rgb(&mut self.off_color);
+                ui.end_row();
+
+                ui.label("Audio Mode");
+                ui.checkbox(&mut self.binaural, "Binaural beats");
+                ui.end_row();
+
+                ui.label("Display");
+                ui.checkbox(&mut self.headless, "Audio only (no visuals)");
+                ui.end_row();
+            });
+
+        ui.add_space(8.0);
+        if ui.button("Export to Program →").clicked() {
+            self.sync_to_text();
+            self.mode = GuiMode::Program;
+        }
+    }
+
+    fn ui_program_mode(&mut self, ui: &mut egui::Ui) {
+        ui.label("Entrainment Program:");
+        ui.add_space(4.0);
+
+        egui::ScrollArea::vertical()
+            .max_height(300.0)
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.program_text)
+                        .code_editor()
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(15),
+                );
+            });
+
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label("Format: ");
+            ui.code("MM:SS param=value >curve");
         });
     }
 }
 
 fn run_gui() -> Result<()> {
-    info!("No arguments provided, launching GUI control panel.");
-
-    // Load icon safely; fallback if missing isn't catastrophic but good to handle
-    let icon_data = include_bytes!("../assets/icon.png");
-    let icon = eframe::icon_data::from_png_bytes(icon_data).context("Failed to parse icon data")?;
-
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([400.0, 360.0])
-            .with_resizable(false)
-            .with_title("Isochronator Control Panel")
-            .with_icon(icon),
-        renderer: eframe::Renderer::Wgpu,
+            .with_inner_size([480.0, 520.0])
+            .with_title("Isochronator"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "Isochronator Control Panel",
+        "Isochronator",
         options,
-        Box::new(|_cc| Ok(Box::<ControlPanelApp>::default())),
+        Box::new(|_cc| Ok(Box::<ControlPanel>::default())),
     )
-    .map_err(|e| anyhow::anyhow!("GUI error: {}", e))
+        .map_err(|e| anyhow::anyhow!("GUI error: {e}"))
 }
 
-fn main() -> Result<()> {
-    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Entry Point
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    if std::env::args().len() <= 1 {
-        return run_gui();
-    }
+fn main() -> Result<()> {
+    env_logger::Builder::from_env(Env::default().default_filter_or("info"))
+        .filter_module("wgpu_core", log::LevelFilter::Warn)
+        .filter_module("wgpu_hal", log::LevelFilter::Warn)
+        .filter_module("naga", log::LevelFilter::Warn)
+        .init();
 
     let args: Args = argh::from_env();
 
-    if args.headless && args.headless_profile {
-        error!("Error: --headless and --headless-profile cannot be used at the same time.");
-        std::process::exit(1);
+    // No arguments: launch GUI
+    if args.program.is_none() && !args.profile {
+        return run_gui();
     }
 
-    let config = AppConfig::from(&args);
-    let timing_state = Arc::new(TimingState::new(config.frequency, config.duty_cycle));
-
-    if args.headless_profile {
-        visuals::run_headless_profile(&timing_state, &config);
-    } else if args.headless {
-        info!("Running in true headless (audio-only) mode. Press Ctrl-C to exit.");
-        let frames = Arc::new(AtomicU64::new(0));
-        let _stream = audio::setup_audio(timing_state, &config, frames)?;
-        std::thread::park();
-    } else {
-        visuals::run_session(config, timing_state)?;
+    // Profile mode: run CPU benchmark for PGO
+    if args.profile {
+        info!("Running profile workload...");
+        let program = Program::parse(DEFAULT_PROGRAM)?;
+        visuals::run_profile(Arc::new(program));
+        info!("Profile complete");
+        return Ok(());
     }
 
-    Ok(())
+    // Session mode: load and run program
+    let path = args.program.context("No program file specified")?;
+    let program = Program::load(&path).with_context(|| format!("Loading {}", path.display()))?;
+
+    info!(
+        "Starting session: duration={:.1}s, binaural={}, headless={}",
+        program.duration, program.settings.binaural, program.settings.headless
+    );
+
+    visuals::run_session(Arc::new(program))
 }
