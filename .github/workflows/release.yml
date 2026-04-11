@@ -63,7 +63,7 @@ jobs:
         run: cargo pgo build -- --bin ${{ env.BINARY_NAME }}
 
       - name: Gather PGO profiles
-        run: cargo pgo run -- -- --headless-profile
+        run: cargo pgo run -- -- --profile
 
       - name: Build PGO-optimized binary
         run: cargo pgo optimize
