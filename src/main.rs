@@ -283,10 +283,10 @@ impl eframe::App for ControlPanel {
         egui::CentralPanel::default().show_inside(ui, |ui| {
             // Header
             ui.horizontal(|ui| {
-                ui.heading("🧠 Isochronator");
+                ui.heading("Isochronator");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.selectable_value(&mut self.mode, GuiMode::Program, "📝 Program");
-                    ui.selectable_value(&mut self.mode, GuiMode::Simple, "🎛️ Simple");
+                    ui.selectable_value(&mut self.mode, GuiMode::Program, "Program");
+                    ui.selectable_value(&mut self.mode, GuiMode::Simple, "Simple");
                 });
             });
             ui.separator();
@@ -302,12 +302,12 @@ impl eframe::App for ControlPanel {
             // Controls
             ui.horizontal(|ui| {
                 if self.active_session.is_some() {
-                    if ui.button("⏹ Stop Session").clicked() {
+                    if ui.button("Stop Session").clicked() {
                         self.stop();
                     }
                     ui.spinner();
                     ui.label("Session running...");
-                } else if ui.button("▶ Launch Session").clicked() {
+                } else if ui.button("Launch Session").clicked() {
                     self.launch();
                 }
                 if let Some(err) = &self.program_error {
@@ -363,7 +363,7 @@ impl ControlPanel {
             });
 
         ui.add_space(8.0);
-        if ui.button("Export to Program →").clicked() {
+        if ui.button("Export to Program").clicked() {
             self.sync_to_text();
             self.mode = GuiMode::Program;
         }
