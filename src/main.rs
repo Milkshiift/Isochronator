@@ -129,9 +129,8 @@ struct Args {
 
 const DEFAULT_PROGRAM: &str = r#"
 // Example entrainment program
-// Starts with alpha (10 Hz), transitions to theta (6 Hz), then fades out
 
-00:00 freq=10 tone=200 vol=0.0 duty=0.5 on=#FFFFFF off=#000000
+00:00 freq=40 tone=200 vol=0.0 duty=0.5 on=#FFFFFF off=#000000
 00:05 vol=0.8 >linear
 01:00 freq=6 >smooth
 02:00 vol=0.0 >linear
