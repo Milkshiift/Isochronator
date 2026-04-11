@@ -1,7 +1,7 @@
 use crate::audio::{self, SyncState};
 use crate::program::Program;
 use anyhow::{Context, Result};
-use log::{error, info, warn};
+use log::{error, info};
 use std::hint::black_box;
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
@@ -26,9 +26,9 @@ impl GpuState {
     async fn new(window: Arc<Window>) -> Result<Self> {
         let size = window.inner_size();
 
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
 
         let surface = instance.create_surface(window)?;
@@ -49,8 +49,6 @@ impl GpuState {
             .await?;
 
         let caps = surface.get_capabilities(&adapter);
-
-        // Prefer sRGB format for correct color rendering
         let format = caps
             .formats
             .iter()
@@ -63,7 +61,7 @@ impl GpuState {
             format,
             width: size.width.max(1),
             height: size.height.max(1),
-            present_mode: wgpu::PresentMode::Fifo, // VSync for smooth visuals
+            present_mode: wgpu::PresentMode::Fifo,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -88,15 +86,18 @@ impl GpuState {
         self.surface.configure(&self.device, &self.config);
     }
 
-    fn render(&self, color: wgpu::Color) -> Result<(), wgpu::SurfaceError> {
-        let output = self.surface.get_current_texture()?;
+    fn render(&self, color: wgpu::Color) -> Result<(), wgpu::CurrentSurfaceTexture> {
+        let output = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(output) | wgpu::CurrentSurfaceTexture::Suboptimal(output) => output,
+            e => return Err(e),
+        };
+
         let view = output.texture.create_view(&Default::default());
 
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
 
-        // Clear to the specified color
         {
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Clear Pass"),
@@ -112,12 +113,12 @@ impl GpuState {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
-
         Ok(())
     }
 }
@@ -317,19 +318,17 @@ impl ApplicationHandler for SessionApp {
 
                 match gpu.render(color) {
                     Ok(()) => {}
-                    Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                    Err(wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated) => {
                         let size = window.inner_size();
                         if let Some(gpu) = &mut self.gpu {
                             gpu.resize(size.width, size.height);
                         }
                     }
-                    Err(wgpu::SurfaceError::OutOfMemory) => {
-                        error!("GPU out of memory");
+                    Err(wgpu::CurrentSurfaceTexture::Validation) => {
+                        error!("GPU validation error");
                         event_loop.exit();
                     }
-                    Err(e) => {
-                        warn!("Render error: {e:?}");
-                    }
+                    Err(_) => {}
                 }
             }
 
@@ -352,7 +351,7 @@ impl ApplicationHandler for SessionApp {
 /// Run a full entrainment session with audio and visuals.
 pub fn run_session(program: Arc<Program>) -> Result<()> {
     let event_loop = EventLoop::new()?;
-    event_loop.set_control_flow(ControlFlow::Poll);
+    event_loop.set_control_flow(ControlFlow::Wait);
 
     let mut app = SessionApp::new(program);
     event_loop.run_app(&mut app)?;

@@ -15,10 +15,10 @@ cpal = "0.17"
 env_logger = "0.11"
 anyhow = "1.0"
 log = "0.4"
-bytemuck = { version = "1.24", features = ["derive"] }
+bytemuck = { version = "1.25", features = ["derive"] }
 argh = "0.1"
-wgpu = "27"
-eframe = { version = "0.33", features = ["default_fonts", "wgpu", "wayland", "x11"], default-features = false }
+wgpu = "29"
+eframe = { version = "0.34", features = ["default_fonts", "wgpu", "wayland", "x11"], default-features = false }
 pollster = "0.4.0"
 
 [profile.release]

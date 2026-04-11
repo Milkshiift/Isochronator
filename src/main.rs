@@ -278,10 +278,10 @@ impl ControlPanel {
 }
 
 impl eframe::App for ControlPanel {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_session();
-
-        egui::CentralPanel::default().show(ctx, |ui| {
+        
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             // Header
             ui.horizontal(|ui| {
                 ui.heading("🧠 Isochronator");
@@ -297,7 +297,6 @@ impl eframe::App for ControlPanel {
                 GuiMode::Simple => self.ui_simple_mode(ui),
                 GuiMode::Program => self.ui_program_mode(ui),
             }
-
             ui.add_space(12.0);
             ui.separator();
 
@@ -312,7 +311,6 @@ impl eframe::App for ControlPanel {
                 } else if ui.button("▶ Launch Session").clicked() {
                     self.launch();
                 }
-
                 if let Some(err) = &self.program_error {
                     ui.colored_label(egui::Color32::RED, err);
                 }
